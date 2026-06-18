@@ -15,5 +15,5 @@ catapulte-domain = { path = "../../domain" }
 catapulte-outbound-sql-core = { path = "../outbound-sql-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v7", "js"] }
+uuid = { version = "1", features = ["v4", "v7", "js"] }
 worker = { version = "0.8" }

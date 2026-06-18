@@ -18,6 +18,7 @@ use catapulte_domain::use_case::list_senders::ListSendersUseCase;
 use catapulte_domain::use_case::submit_email::SubmitEmailUseCase;
 #[cfg(feature = "server")]
 use tokio_util::sync::CancellationToken;
+#[cfg(feature = "server")]
 use tower_http::trace::TraceLayer;
 
 /// Provides the readiness check that the `/health/ready` route dispatches into.
@@ -92,21 +93,27 @@ pub fn router<S: HttpServerState>(
     api_key: Option<String>,
     request_timeout: std::time::Duration,
 ) -> Router {
-    // Bounds slow/hung requests. Deliberately NOT applied to the submit routes
-    // below: those stream multipart attachment bodies (up to several hundred MiB)
-    // and a whole-request deadline would truncate legitimate large uploads over
-    // slow links. Submit is instead bounded by the body-size limit and the
-    // per-attachment fetch timeouts. Reads and the health probes are bounded here.
-    let timeout_layer = tower_http::timeout::TimeoutLayer::with_status_code(
-        axum::http::StatusCode::REQUEST_TIMEOUT,
-        request_timeout,
-    );
+    // The request-timeout and trace layers use a real timer (`Instant::now`)
+    // and are native-only — on wasm (Workers) they panic ("time not implemented"),
+    // and Cloudflare provides request timeouts + observability itself. They are
+    // therefore gated behind the `server` feature.
+    //
+    // The timeout deliberately does NOT cover the submit routes: those stream
+    // multipart attachment bodies (up to several hundred MiB) and a whole-request
+    // deadline would truncate legitimate large uploads. Submit is bounded by the
+    // body-size limit and per-attachment fetch timeouts instead.
+    #[cfg(not(feature = "server"))]
+    let _ = request_timeout;
 
     let health_routes = Router::new()
         .route("/health/live", get(crate::routes::health::live))
-        .route("/health/ready", get(crate::routes::health::ready::<S>))
-        .layer(timeout_layer)
-        .with_state(state.clone());
+        .route("/health/ready", get(crate::routes::health::ready::<S>));
+    #[cfg(feature = "server")]
+    let health_routes = health_routes.layer(tower_http::timeout::TimeoutLayer::with_status_code(
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        request_timeout,
+    ));
+    let health_routes = health_routes.with_state(state.clone());
 
     let read_routes = Router::new()
         .route("/emails", get(crate::routes::emails::list_emails::<S>))
@@ -115,8 +122,12 @@ pub fn router<S: HttpServerState>(
             get(crate::routes::events::list_events_for_email::<S>),
         )
         .route("/events", get(crate::routes::events::list_events::<S>))
-        .route("/senders", get(crate::routes::senders::list_senders::<S>))
-        .layer(timeout_layer);
+        .route("/senders", get(crate::routes::senders::list_senders::<S>));
+    #[cfg(feature = "server")]
+    let read_routes = read_routes.layer(tower_http::timeout::TimeoutLayer::with_status_code(
+        axum::http::StatusCode::REQUEST_TIMEOUT,
+        request_timeout,
+    ));
 
     let submit_routes = Router::new()
         .route("/emails", post(crate::routes::emails::submit_email::<S>))
@@ -134,11 +145,10 @@ pub fn router<S: HttpServerState>(
         None => protected_routes,
     };
 
-    Router::new()
-        .merge(protected_routes)
-        .merge(health_routes)
-        .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(crate::dto::MAX_REQUEST_BODY_BYTES))
+    let app = Router::new().merge(protected_routes).merge(health_routes);
+    #[cfg(feature = "server")]
+    let app = app.layer(TraceLayer::new_for_http());
+    app.layer(DefaultBodyLimit::max(crate::dto::MAX_REQUEST_BODY_BYTES))
 }
 
 pub struct InboundHttpConfig {

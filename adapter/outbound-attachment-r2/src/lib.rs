@@ -80,7 +80,7 @@ impl AttachmentStore for R2AttachmentStore {
                 .await
                 .map_err(|e| io("reading attachment", e))?;
             let size_bytes = bytes.len() as u64;
-            let key = uuid::Uuid::now_v7().to_string();
+            let key = uuid::Uuid::new_v4().to_string();
             let bucket = env.bucket(&binding).map_err(|e| io("r2 binding", e))?;
             bucket
                 .put(key.clone(), bytes)

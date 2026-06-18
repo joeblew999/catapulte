@@ -12,7 +12,7 @@ publish = false
 anyhow = "1"
 catapulte-domain = { path = "../../domain" }
 tokio = { version = "1", default-features = false, features = ["io-util"] }
-uuid = { version = "1", features = ["v7", "js"] }
+uuid = { version = "1", features = ["v4", "v7", "js"] }
 worker = { version = "0.8" }
 # Bridges the !Send R2 handle/futures to the Send+Sync AttachmentStore port.
 send_wrapper = "0.6"

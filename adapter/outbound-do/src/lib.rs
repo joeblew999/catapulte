@@ -579,7 +579,7 @@ impl EventPublisher for DoStore {
                  (id, email_id, event_type, payload, sender_name, error_class) \
                  VALUES (?, ?, ?, ?, ?, ?)",
                 vec![
-                    uuid::Uuid::now_v7().to_string().into(),
+                    uuid::Uuid::new_v4().to_string().into(),
                     event.email_id().as_uuid().to_string().into(),
                     event.event_type().to_owned().into(),
                     event.payload().to_string().into(),
