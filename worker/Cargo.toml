@@ -1,0 +1,23 @@
+# Standalone (excluded from the native workspace): the wasm32 Cloudflare
+# Workers entrypoint. Built with `worker-build` (see wrangler.toml), not the
+# native `cargo build --workspace`.
+[package]
+name = "catapulte-worker"
+version = "2.0.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.95"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worker = { version = "0.8", features = ["d1"] }
+catapulte-domain = { path = "../domain" }
+catapulte-outbound-d1 = { path = "../adapter/outbound-d1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# wasm randomness backend for transitive users of getrandom 0.2.
+getrandom = { version = "0.2", features = ["js"] }
+console_error_panic_hook = "0.1"

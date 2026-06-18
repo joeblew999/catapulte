@@ -1,0 +1,21 @@
+name = "catapulte-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-05-01"
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+# D1 database holding the emails table. First-deploy flow:
+#   1. wrangler d1 create catapulte
+#   2. paste the printed database_id below (it is not a secret)
+#   3. wrangler d1 migrations apply catapulte
+#   4. wrangler deploy
+[[d1_databases]]
+binding = "DB"
+database_name = "catapulte"
+database_id = "REPLACE_WITH_WRANGLER_D1_CREATE_OUTPUT"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true
+head_sampling_rate = 1.0

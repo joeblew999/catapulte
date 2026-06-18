@@ -21,6 +21,13 @@ members = [
     "domain",
     "telemetry",
 ]
+# wasm32-only crates for the Cloudflare Workers runtime. Excluded from the
+# native workspace so `cargo build --workspace` (host) stays green — they only
+# build for wasm32 and are compiled separately via `worker-build`. See worker/.
+exclude = [
+    "worker",
+    "adapter/outbound-d1",
+]
 
 [workspace.package]
 version = "2.0.0"

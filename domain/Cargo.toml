@@ -14,7 +14,11 @@ anyhow = { workspace = true }
 bytes = "1"
 serde_json = { workspace = true }
 thiserror = { version = "2.0" }
-tokio = { workspace = true, features = ["io-util"] }
+# Pinned to io-util only (not workspace-inherited) so the domain crate stays
+# wasm32-clean for the Workers runtime — the workspace tokio carries
+# rt-multi-thread/signal, which pull mio and don't compile to wasm. Native
+# builds still get full tokio via feature unification from the binary.
+tokio = { version = "1", default-features = false, features = ["io-util"] }
 tracing = { workspace = true }
 url = { version = "2.5" }
 uuid = { workspace = true }
