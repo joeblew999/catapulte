@@ -18,6 +18,8 @@
 # Cloudflare Workers runtime (feat/worker-runtime): wasm bundler + CLI.
 "cargo:worker-build" = "^0.8"
 "npm:wrangler" = "4.90.1"
+# wrangler is an npm CLI → needs node.
+"node" = "24"
 
 [env]
 RUST_BACKTRACE = "1"
