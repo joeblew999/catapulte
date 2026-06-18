@@ -209,6 +209,19 @@ impl DoStore {
         Ok(())
     }
 
+    /// Postpones an entry without counting it as a delivery attempt (used when
+    /// a sender is over quota — it's a deferral, not a failure).
+    ///
+    /// # Errors
+    /// Returns an error if the update fails.
+    pub fn defer(&self, email_id: &str, run_at_ms: i64) -> WResult<()> {
+        self.sql.exec(
+            "UPDATE email_queue SET run_at_ms = ? WHERE email_id = ?",
+            vec![SqlStorageValue::Integer(run_at_ms), email_id.into()],
+        )?;
+        Ok(())
+    }
+
     /// Removes an entry from the queue (delivered or permanently failed).
     ///
     /// # Errors
@@ -688,21 +701,70 @@ impl DoStore {
     }
 }
 
+#[derive(Deserialize)]
+struct CountRow {
+    event_type: String,
+    n: f64,
+}
+
 impl SenderUsage for DoStore {
     fn get_stats(
         &self,
         names: &[SenderName],
-        _since_ms: i64,
+        since_ms: i64,
     ) -> impl Future<Output = Result<Vec<SenderStats>, SenderUsageError>> + Send {
-        let stats: Vec<SenderStats> = names
-            .iter()
-            .map(|name| SenderStats {
+        let result = self.get_stats_sync(names, since_ms);
+        async move { result }
+    }
+}
+
+impl DoStore {
+    fn get_stats_sync(
+        &self,
+        names: &[SenderName],
+        since_ms: i64,
+    ) -> Result<Vec<SenderStats>, SenderUsageError> {
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            // Count delivery outcomes for this sender since `since_ms`.
+            let rows: Vec<CountRow> = self
+                .sql
+                .exec(
+                    "SELECT event_type, COUNT(*) AS n FROM lifecycle_events \
+                     WHERE sender_name = ? AND created_at_ms >= ? \
+                     AND event_type IN ('delivery.succeeded', 'delivery.failed') \
+                     GROUP BY event_type",
+                    vec![
+                        name.as_str().to_owned().into(),
+                        SqlStorageValue::Integer(since_ms),
+                    ],
+                )
+                .map_err(|e| SenderUsageError::Storage {
+                    source: anyhow::anyhow!("usage query: {e}"),
+                })?
+                .to_array()
+                .map_err(|e| SenderUsageError::Storage {
+                    source: anyhow::anyhow!("decoding usage: {e}"),
+                })?;
+
+            let mut sent_in_range = 0_u64;
+            let mut failed_in_range = 0_u64;
+            for row in rows {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let n = row.n as u64;
+                match row.event_type.as_str() {
+                    "delivery.succeeded" => sent_in_range = n,
+                    "delivery.failed" => failed_in_range = n,
+                    _ => {}
+                }
+            }
+            out.push(SenderStats {
                 name: name.clone(),
-                sent_in_range: 0,
-                failed_in_range: 0,
-            })
-            .collect();
-        async move { Ok(stats) }
+                sent_in_range,
+                failed_in_range,
+            });
+        }
+        Ok(out)
     }
 }
 

@@ -25,7 +25,8 @@ use catapulte_domain::entity::body::{BodySource, MjmlSource};
 use catapulte_domain::entity::email::EmailId;
 use catapulte_domain::entity::error_class::ErrorClass;
 use catapulte_domain::entity::lifecycle_event::LifecycleEvent;
-use catapulte_domain::entity::sender::SenderName;
+use catapulte_domain::entity::sender::{QuotaRange, SenderConfig, SenderName, SenderQuota};
+use catapulte_domain::port::sender_usage::SenderUsage;
 use catapulte_domain::port::attachment_fetcher::{AttachmentFetchError, AttachmentFetcher};
 use catapulte_domain::port::attachment_store::AttachmentReader;
 use catapulte_domain::port::clock::Clock;
@@ -49,15 +50,29 @@ const EMAIL_BINDING: &str = "EMAIL";
 const TEMPLATES_BINDING: &str = "TEMPLATES";
 const ATTACHMENTS_BINDING: &str = "ATTACHMENTS";
 const API_KEY_VAR: &str = "CATAPULTE_HTTP_API_KEY";
+const TENANT_HEADER: &str = "X-Catapulte-Tenant";
+const DEFAULT_TENANT: &str = "default";
 const MAX_ATTEMPTS: i64 = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// (C) Multi-tenant sharding: each tenant gets its own Durable Object instance
+/// — isolated SQLite, queue, alarm and data. The tenant comes from the
+/// `X-Catapulte-Tenant` header (default `"default"`). One tenant per customer /
+/// app keeps data separated and spreads load across DO instances. The sender
+/// *domain* (A) is orthogonal: a tenant may send from any CF-verified domain.
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: worker::Context) -> Result<Response> {
     console_error_panic_hook::set_once();
+    let tenant = req
+        .headers()
+        .get(TENANT_HEADER)
+        .ok()
+        .flatten()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_TENANT.to_owned());
     let stub = env
         .durable_object(DO_BINDING)?
-        .id_from_name("default")?
+        .id_from_name(&tenant)?
         .get_stub()?;
     stub.fetch_with_request(req).await
 }
@@ -133,7 +148,7 @@ impl AppState {
             list_emails: Arc::new(ListEmailsService::new(DoStore::new(storage.sql()))),
             list_events: Arc::new(ListEventsService::new(DoStore::new(storage.sql()))),
             list_senders: Arc::new(ListSendersService::new(
-                Vec::new(),
+                parse_senders(env),
                 DoStore::new(storage.sql()),
                 WasmClock,
             )),
@@ -218,14 +233,17 @@ impl DurableObject for CatapulteStore {
         for item in store.claim_due(now, 10)? {
             let id = uuid::Uuid::parse_str(&item.email_id).map(EmailId::from);
             match self.deliver(&store, &item.email_id).await {
-                Ok(()) => {
+                // (B) Over quota — postpone without counting an attempt.
+                Ok(Outcome::Deferred(run_at)) => store.defer(&item.email_id, run_at)?,
+                Ok(Outcome::Sent(sender_name)) => {
                     store.set_status(&item.email_id, "sent")?;
                     store.dequeue(&item.email_id)?;
                     if let Ok(id) = id {
                         let _ = store
                             .publish(&LifecycleEvent::Sent {
                                 id,
-                                sender_name: SenderName::new("cloudflare"),
+                                sender_name: sender_name
+                                    .unwrap_or_else(|| SenderName::new("cloudflare")),
                                 correlation_id: None,
                             })
                             .await;
@@ -265,13 +283,38 @@ impl DurableObject for CatapulteStore {
 impl CatapulteStore {
     /// Renders the email and sends it via the Email Service binding — one
     /// message per recipient. The sender domain must be verified in CF.
-    async fn deliver(&self, store: &DoStore, email_id: &str) -> Result<()> {
+    ///
+    /// (B) Resolves the configured sender for the from-domain, and if it has a
+    /// quota that's exhausted in the window, returns `Deferred` instead of
+    /// sending. Returns the matched sender name so the alarm attributes events.
+    async fn deliver(&self, store: &DoStore, email_id: &str) -> Result<Outcome> {
         let Some(email) = store
             .load_envelope(email_id)
             .map_err(|e| worker::Error::RustError(e.to_string()))?
         else {
-            return Ok(());
+            return Ok(Outcome::Sent(None));
         };
+
+        // (B) Sender resolution + quota enforcement.
+        let configs = parse_senders(&self.env);
+        let matched = match_sender(&configs, &email.sender).cloned();
+        let sender_name = matched.as_ref().map(|c| c.name.clone());
+        if let Some(cfg) = &matched
+            && let Some(quota) = &cfg.quota
+        {
+            let now = i64::try_from(Date::now().as_millis()).unwrap_or(i64::MAX);
+            let since = quota.range.since_ms(now);
+            let stats = store
+                .get_stats(std::slice::from_ref(&cfg.name), since)
+                .await
+                .map_err(|e| worker::Error::RustError(e.to_string()))?;
+            let sent = stats.first().map_or(0, |s| s.sent_in_range);
+            if sent >= quota.count {
+                // Re-check at most hourly; the window slides as old sends age out.
+                let window = (now - since).min(3_600_000).max(60_000);
+                return Ok(Outcome::Deferred(now + window));
+            }
+        }
 
         let (text, html) = self
             .render(&email.body, &email.variables)
@@ -309,7 +352,7 @@ impl CatapulteStore {
             let message = EmailMessage::new(&email.sender, to, &raw)?;
             sender.send(&message).await?;
         }
-        Ok(())
+        Ok(Outcome::Sent(sender_name))
     }
 
     async fn render(
@@ -419,6 +462,71 @@ fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
         .element
         .render(&mrml::prelude::render::RenderOptions::default())
         .map_err(|e| format!("mjml render failed: {e}"))
+}
+
+/// Outcome of a delivery attempt.
+enum Outcome {
+    /// Sent via the matched sender (name attributed to lifecycle events).
+    Sent(Option<SenderName>),
+    /// Over quota — postponed to the given `run_at_ms` without an attempt bump.
+    Deferred(i64),
+}
+
+// --- (B) sender config + routing -------------------------------------------
+
+/// Sender config as supplied in the `CATAPULTE_SENDERS` env var (JSON array).
+#[derive(serde::Deserialize)]
+struct SenderConfigDto {
+    name: String,
+    #[serde(default)]
+    match_domain: Option<String>,
+    #[serde(default)]
+    quota_count: Option<u64>,
+    #[serde(default)]
+    quota_range: Option<String>,
+}
+
+/// Parses `CATAPULTE_SENDERS` (a JSON array) into sender configs. On CF there
+/// is one egress (the Email Service binding), so a "sender" is a from-domain
+/// with an optional send quota — not an SMTP relay. Empty/absent → no senders.
+fn parse_senders(env: &Env) -> Vec<SenderConfig> {
+    let Ok(raw) = env.var("CATAPULTE_SENDERS") else {
+        return Vec::new();
+    };
+    let raw = raw.to_string();
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    let dtos: Vec<SenderConfigDto> = serde_json::from_str(&raw).unwrap_or_default();
+    dtos.into_iter()
+        .map(|d| SenderConfig {
+            name: SenderName::new(d.name),
+            match_sender_domain: d.match_domain,
+            quota: d.quota_count.map(|count| SenderQuota {
+                count,
+                range: parse_range(d.quota_range.as_deref()),
+            }),
+        })
+        .collect()
+}
+
+fn parse_range(s: Option<&str>) -> QuotaRange {
+    match s {
+        Some("hourly") => QuotaRange::Hourly,
+        Some("weekly") => QuotaRange::Weekly,
+        Some("monthly") => QuotaRange::Monthly,
+        _ => QuotaRange::Daily,
+    }
+}
+
+/// Picks the sender whose `match_domain` equals the from-address domain, else a
+/// catch-all sender (one with no `match_domain`), else `None`.
+fn match_sender<'a>(configs: &'a [SenderConfig], sender_addr: &str) -> Option<&'a SenderConfig> {
+    let domain = sender_addr.rsplit('@').next().unwrap_or("");
+    configs
+        .iter()
+        .find(|c| c.match_sender_domain.as_deref() == Some(domain))
+        .or_else(|| configs.iter().find(|c| c.match_sender_domain.is_none()))
 }
 
 /// A rendered, base64-encoded attachment ready for the MIME body.

@@ -25,6 +25,12 @@ name = "EMAIL"
 binding = "ATTACHMENTS"
 bucket_name = "catapulte-attachments"
 
+# (B) Per-sender quotas/reporting (optional). JSON array; on CF a "sender" is a
+# from-domain with a send quota, not an SMTP relay. A sender with no
+# match_domain is the catch-all. Omit/empty to disable (GET /senders → []).
+[vars]
+CATAPULTE_SENDERS = '[{"name":"primary","match_domain":"example.com","quota_count":1000,"quota_range":"daily"}]'
+
 [observability]
 enabled = true
 head_sampling_rate = 1.0

@@ -80,6 +80,32 @@ mise run worker:tail
 - `GET /emails`, `GET /emails/{id}/events`, `GET /events`, `GET /senders`
 - `GET /health/live`, `GET /health/ready`
 
+## Multi-domain & multi-tenant (A / B / C)
+
+**(A) Sending from many domains** — no code/config. Verify each domain in your
+CF account, then set it as the request's `sender`. The `EMAIL` binding sends
+from any verified domain; an unverified one is rejected
+(`E_SENDER_DOMAIN_NOT_AVAILABLE`).
+
+**(B) Per-sender quotas + reporting** — set the `CATAPULTE_SENDERS` var (JSON):
+```toml
+[vars]
+CATAPULTE_SENDERS = '[{"name":"primary","match_domain":"acme.com","quota_count":1000,"quota_range":"daily"}]'
+```
+`GET /senders` reports each sender with live `sent_in_range`/`failed_in_range`.
+At delivery the sender is matched by from-domain (a sender with no `match_domain`
+is the catch-all); if its quota is exhausted in the window the email is
+**deferred** (re-checked, not failed) until the window frees up.
+`quota_range` ∈ `hourly|daily|weekly|monthly`. On CF there's one egress, so a
+"sender" is a from-domain + quota, not an SMTP relay.
+
+**(C) Multi-tenant isolation** — send the `X-Catapulte-Tenant: <id>` header.
+Each tenant gets its own Durable Object: isolated SQLite, queue, alarm and
+data (verified — one tenant's `GET /emails` never sees another's). No header →
+the `default` tenant. This is also how you scale: load spreads across DO
+instances. Sender domains (A) are orthogonal — a tenant may use any verified
+domain.
+
 ## Notes / limits
 
 - **Throughput**: a single DO instance ("default") serializes all work. For
