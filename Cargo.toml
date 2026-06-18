@@ -13,6 +13,7 @@ members = [
     "adapter/outbound-attachment-redis",
     "adapter/outbound-resolver",
     "adapter/outbound-smtp",
+    "adapter/outbound-cloudflare",
     "adapter/outbound-nats",
     "adapter/outbound-webhook",
     "adapter/outbound-postgres",

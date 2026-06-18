@@ -607,6 +607,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "catapulte-outbound-cloudflare"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "catapulte-domain",
+ "lettre",
+ "reqwest 0.12.28",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "catapulte-outbound-interpolator"
 version = "2.0.0"
 dependencies = [

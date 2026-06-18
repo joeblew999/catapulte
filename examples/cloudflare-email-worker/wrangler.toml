@@ -1,0 +1,15 @@
+name = "catapulte-email-worker"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# The Email Sending binding. `destination_address` is required when using the
+# Email Routing binding (recipients must be verified in your zone). If you are
+# on the newer Email Sending product, configure the binding per its docs — the
+# Worker code is unchanged, only the binding wiring differs.
+send_email = [
+  { name = "SEB" },
+]
+
+# Optional shared secret the Worker checks against the adapter's
+# CATAPULTE_SENDER_{NAME}_TOKEN. Set with:
+#   wrangler secret put CATAPULTE_TOKEN
