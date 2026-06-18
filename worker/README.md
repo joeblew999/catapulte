@@ -29,16 +29,23 @@ Crates:
 - `GET /health/live` → `ok`
 - `POST /emails` → persists + enqueues + arms the alarm
 - `GET /emails` → lists stored emails
-- `alarm()` → claims due queue rows, retries with capped exponential backoff,
-  re-arms for the next due entry
+- `alarm()` → claims due queue rows, **renders and sends each** (then dequeues),
+  retries with capped exponential backoff, re-arms for the next due entry
+- **Delivery** (`deliver()`): interpolates variables (minijinja), renders
+  inline MJML → HTML (mrml, compiled to wasm), builds RFC822 MIME, and sends one
+  message per recipient via the Email Service `send_email` binding (`EMAIL`)
 
-## What's deferred (next slice)
+Caveats: the sender domain must be verified in your Cloudflare account. Named/
+remote MJML templates aren't resolvable in the worker yet (they error so the
+queue retries rather than sending blanks) — inline MJML and plain bodies work.
 
-**Real delivery.** `deliver()` in `worker/src/lib.rs` is the injection point:
-render the MJML body and send via the `send_email` binding. Today it is a
-no-op success so the queue/alarm machinery runs end to end. Also deferred:
-reusing the real `inbound-http` axum `router()`, MRML wasm build, R2
-attachments, and real delivery-event status.
+## What's deferred
+
+- Reusing the real `inbound-http` axum `router()` (it's separable from the
+  socket) instead of the hand-wired routes.
+- Named/remote template resolution (fetch via `worker::Fetch`).
+- R2 attachments and real delivery-event status (`list_emails` reports
+  everything as `queued`).
 
 ## Deploy
 

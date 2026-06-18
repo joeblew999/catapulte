@@ -16,7 +16,8 @@
 use std::future::Future;
 
 use catapulte_domain::entity::attachment::{AttachmentRef, BlobRef};
-use catapulte_domain::entity::email::EmailId;
+use catapulte_domain::entity::body::BodySource;
+use catapulte_domain::entity::email::{EmailId, RecipientKind};
 use catapulte_domain::entity::envelope::Envelope;
 use catapulte_domain::port::email_repository::{
     EmailRecord, EmailRepository, EmailRepositoryError, EmailStatus, ListEmailsParams, SaveResult,
@@ -82,6 +83,24 @@ struct RunAtRow {
 pub struct DueEmail {
     pub email_id: String,
     pub attempts: i64,
+}
+
+/// Everything the delivery step needs for one email, with domain types restored.
+pub struct StoredEmail {
+    pub sender: String,
+    pub subject: Option<String>,
+    pub recipients: Vec<(RecipientKind, String)>,
+    pub body: BodySource,
+    pub variables: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct FullRow {
+    sender: String,
+    subject: Option<String>,
+    recipients: String,
+    body: String,
+    variables: String,
 }
 
 // --- adapter ----------------------------------------------------------------
@@ -170,6 +189,43 @@ impl DoStore {
             vec![email_id.into()],
         )?;
         Ok(())
+    }
+
+    /// Loads the full envelope for a delivery attempt, with domain types
+    /// restored. `None` if the row is gone.
+    ///
+    /// # Errors
+    /// Returns an error if the query or decoding fails.
+    pub fn load_envelope(&self, email_id: &str) -> Result<Option<StoredEmail>, EmailRepositoryError> {
+        let rows: Vec<FullRow> = self
+            .sql
+            .exec(
+                "SELECT sender, subject, recipients, body, variables FROM emails WHERE id = ?",
+                vec![email_id.into()],
+            )
+            .map_err(|e| err("loading envelope", e))?
+            .to_array()
+            .map_err(|e| err("decoding envelope", e))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+
+        let recipients: Vec<RecipientDto> =
+            serde_json::from_str(&row.recipients).map_err(|e| err("decoding recipients", e))?;
+        let deser: EnvelopeBodyDtoDeser =
+            serde_json::from_str(&row.body).map_err(|e| err("decoding body", e))?;
+        let (source_dto, _attachments) = deser.split();
+        let body = BodySource::try_from(source_dto).map_err(|e| err("rebuilding body", e))?;
+        let variables: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&row.variables).unwrap_or_default();
+
+        Ok(Some(StoredEmail {
+            sender: row.sender,
+            subject: row.subject,
+            recipients: recipients_from_dto(recipients),
+            body,
+            variables,
+        }))
     }
 
     /// Earliest pending `run_at_ms`, for arming the next alarm. `None` if empty.

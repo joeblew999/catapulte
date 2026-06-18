@@ -15,6 +15,11 @@ class_name = "CatapulteStore"
 tag = "v1"
 new_sqlite_classes = ["CatapulteStore"]
 
+# Email Service send binding used by deliver(). The sender domain must be
+# configured/verified in your Cloudflare account.
+[[send_email]]
+name = "EMAIL"
+
 [observability]
 enabled = true
 head_sampling_rate = 1.0

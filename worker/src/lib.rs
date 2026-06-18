@@ -25,10 +25,12 @@ use catapulte_domain::port::email_repository::{
 use catapulte_outbound_do::DoStore;
 use serde::{Deserialize, Serialize};
 use worker::{
-    Date, DurableObject, Env, Method, Request, Response, Result, State, durable_object, event,
+    Date, DurableObject, EmailMessage, Env, Method, Request, Response, Result, State,
+    durable_object, event,
 };
 
 const DO_BINDING: &str = "CATAPULTE_STORE";
+const EMAIL_BINDING: &str = "EMAIL";
 const MAX_ATTEMPTS: i64 = 5;
 
 #[event(fetch)]
@@ -74,7 +76,7 @@ impl DurableObject for CatapulteStore {
 
         let now = i64::try_from(Date::now().as_millis()).unwrap_or(i64::MAX);
         for item in store.claim_due(now, 10)? {
-            match deliver(&item.email_id).await {
+            match self.deliver(&store, &item.email_id).await {
                 Ok(()) => store.dequeue(&item.email_id)?,
                 // Give up after MAX_ATTEMPTS — drop from the queue.
                 Err(_) if item.attempts + 1 >= MAX_ATTEMPTS => store.dequeue(&item.email_id)?,
@@ -115,6 +117,92 @@ impl CatapulteStore {
 
         Response::from_json(&serde_json::json!({ "id": id.as_uuid().to_string() }))
     }
+
+    /// Renders the email and sends it via the Email Service binding — one
+    /// message per recipient. The sender domain must be verified in CF.
+    async fn deliver(&self, store: &DoStore, email_id: &str) -> Result<()> {
+        let Some(email) = store
+            .load_envelope(email_id)
+            .map_err(|e| worker::Error::RustError(e.to_string()))?
+        else {
+            return Ok(()); // row gone — nothing to deliver
+        };
+
+        let (text, html) =
+            render_body(&email.body, &email.variables).map_err(worker::Error::RustError)?;
+        let subject = email.subject.as_deref().unwrap_or("");
+        let sender = self.env.send_email(EMAIL_BINDING)?;
+
+        for (_, to) in &email.recipients {
+            let raw = build_mime(&email.sender, to, subject, text.as_deref(), html.as_deref());
+            let message = EmailMessage::new(&email.sender, to, &raw)?;
+            sender.send(&message).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Interpolates variables (minijinja) and renders MJML bodies (mrml) to a
+/// `(text, html)` pair. Named/remote templates are not resolvable in the worker
+/// yet — they error so the queue retries/drops rather than sending blanks.
+fn render_body(
+    body: &BodySource,
+    vars: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(Option<String>, Option<String>), String> {
+    match body {
+        BodySource::Plain(p) => {
+            let text = p.text().map(|t| interpolate(t, vars)).transpose()?;
+            let html = p.html().map(|h| interpolate(h, vars)).transpose()?;
+            Ok((text, html))
+        }
+        BodySource::Mjml(MjmlSource::Inline(src)) => {
+            let mjml = interpolate(src, vars)?;
+            Ok((None, Some(render_mjml(&mjml)?)))
+        }
+        BodySource::Mjml(MjmlSource::Named(_) | MjmlSource::Remote(_)) => {
+            Err("named/remote MJML templates are not supported in the worker yet".to_owned())
+        }
+    }
+}
+
+fn interpolate(
+    template: &str,
+    vars: &serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<String, String> {
+    let env = minijinja::Environment::new();
+    env.render_str(template, minijinja::Value::from_serialize(vars))
+        .map_err(|e| format!("interpolation failed: {e}"))
+}
+
+fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
+    let parsed = mrml::parse(mjml).map_err(|e| format!("mjml parse failed: {e}"))?;
+    parsed
+        .element
+        .render(&mrml::prelude::render::RenderOptions::default())
+        .map_err(|e| format!("mjml render failed: {e}"))
+}
+
+/// Builds a minimal RFC822 message. CRLF line endings, multipart/alternative
+/// when both parts are present.
+fn build_mime(from: &str, to: &str, subject: &str, text: Option<&str>, html: Option<&str>) -> String {
+    let headers = format!("From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\n");
+    match (text, html) {
+        (Some(t), Some(h)) => {
+            let b = "catapulte-alt-boundary";
+            format!(
+                "{headers}Content-Type: multipart/alternative; boundary=\"{b}\"\r\n\r\n\
+                 --{b}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{t}\r\n\
+                 --{b}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{h}\r\n--{b}--\r\n"
+            )
+        }
+        (None, Some(h)) => {
+            format!("{headers}Content-Type: text/html; charset=utf-8\r\n\r\n{h}\r\n")
+        }
+        (Some(t), None) => {
+            format!("{headers}Content-Type: text/plain; charset=utf-8\r\n\r\n{t}\r\n")
+        }
+        (None, None) => format!("{headers}Content-Type: text/plain; charset=utf-8\r\n\r\n\r\n"),
+    }
 }
 
 async fn list_emails(store: &DoStore) -> Result<Response> {
@@ -133,13 +221,6 @@ async fn list_emails(store: &DoStore) -> Result<Response> {
         .map_err(|e| worker::Error::RustError(e.to_string()))?;
     let out: Vec<EmailRecordDto> = records.into_iter().map(EmailRecordDto::from).collect();
     Response::from_json(&out)
-}
-
-/// INJECTION POINT for real delivery (next slice): render the MJML body and
-/// send via the `send_email` binding. For now a no-op success so the queue
-/// drains and the alarm/retry machinery is exercised end to end.
-async fn deliver(_email_id: &str) -> Result<()> {
-    Ok(())
 }
 
 /// Exponential backoff in ms, capped at 5 minutes.
