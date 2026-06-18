@@ -1,0 +1,130 @@
+# mise tasks for catapulte (github.com/joeblew999/catapulte).
+#
+# Conventions (joeblew999 global SSOT):
+#   - Rust is owned by rustup, NOT mise (no `rust` in [tools]).
+#   - nushell/gh/jq/fnox/git-cliff are GLOBAL tools (~/.config/mise) — not
+#     redeclared here. [tools] below is repo-specific ONLY.
+#   - Secrets resolve through fnox (see fnox.toml). Tasks that touch real SMTP
+#     creds or the HTTP API key wrap the command in `fnox exec --`.
+#
+# This is an overlay on top of the upstream `justfile`; the cargo:* tasks
+# mirror its recipes so either runner works.
+
+[tools]
+# Unused-dependency check (justfile `machete`).
+"cargo:cargo-machete" = "latest"
+# Local SMTP sink for the dev loop — catches mail without a real provider.
+"aqua:axllent/mailpit" = "latest"
+
+[env]
+RUST_BACKTRACE = "1"
+
+
+# =============================================================================
+# mise:* — bootstrap
+# =============================================================================
+
+[tasks."mise:install"]
+description = "Install every repo-specific CLI tool declared above"
+shell = "nu -c"
+run = "mise install"
+
+
+# =============================================================================
+# cargo:* — Rust dev loop (mirrors the justfile)
+# =============================================================================
+
+[tasks."cargo:check"]
+description = "Type-check the entire workspace"
+shell = "nu -c"
+run = "cargo check --workspace --all-targets"
+
+[tasks."cargo:build"]
+description = "Build the workspace (debug)"
+shell = "nu -c"
+run = "cargo build --workspace"
+
+[tasks."cargo:build:release"]
+description = "Build the catapulte binary (release)"
+shell = "nu -c"
+run = "cargo build --release -p catapulte"
+
+[tasks."cargo:test"]
+description = "Run the test suite"
+shell = "nu -c"
+run = "cargo test --workspace --all-targets"
+
+[tasks."cargo:lint"]
+description = "Lint with clippy (deny warnings)"
+shell = "nu -c"
+run = "cargo clippy --workspace --all-targets -- -D warnings"
+
+[tasks."cargo:format"]
+description = "Apply rustfmt to all crates"
+shell = "nu -c"
+run = "cargo fmt --all"
+
+[tasks."cargo:machete"]
+description = "Detect unused dependencies (must report none)"
+shell = "nu -c"
+run = "cargo machete"
+
+[tasks."cargo:pre-pr"]
+description = "Format + lint + test + machete before opening a PR"
+depends = ["cargo:format", "cargo:lint", "cargo:test", "cargo:machete"]
+
+
+# =============================================================================
+# run:* — local dev loop (catapulte + mailpit, zero secrets)
+# =============================================================================
+# Defaults mirror compose/local-dev.yml but point at a LOCAL mailpit instead of
+# a container: sqlite in-memory storage, storage-backed queue, plaintext SMTP on
+# 127.0.0.1:1025. No fnox secrets are required for this path.
+
+[tasks."run:mailpit"]
+description = "Start mailpit — SMTP sink on :1025, web UI on http://localhost:8025"
+shell = "nu -c"
+run = "mailpit --smtp 0.0.0.0:1025 --listen 0.0.0.0:8025"
+
+[tasks."run:dev"]
+description = "Run catapulte locally against mailpit (sqlite :memory:). Start `run:mailpit` first."
+shell = "nu -c"
+# `fnox exec --` layers any CATAPULTE_HTTP_API_KEY / SMTP creds you've stored on
+# top of these dev defaults; with nothing stored the API stays open (dev only).
+run = "fnox exec -- cargo run -p catapulte"
+
+[tasks."run:dev".env]
+CATAPULTE_HTTP_ADDRESS = "0.0.0.0:3000"
+CATAPULTE_STORAGE_BACKEND = "sqlite"
+CATAPULTE_SQLITE_URL = ":memory:"
+CATAPULTE_QUEUE_BACKEND = "storage"
+CATAPULTE_SENDERS = "mailpit"
+CATAPULTE_SENDER_MAILPIT_HOST = "127.0.0.1"
+CATAPULTE_SENDER_MAILPIT_PORT = "1025"
+CATAPULTE_SENDER_MAILPIT_TLS = "none"
+CATAPULTE_ATTACHMENT_FS_ROOT = "./.data/attachments"
+
+[tasks."run:compose"]
+description = "Bring up the full local-dev stack (catapulte + mailpit) via docker compose"
+shell = "nu -c"
+run = "docker compose -f compose/local-dev.yml up --build"
+
+[tasks."run:health"]
+description = "Probe a running catapulte instance (expects run:dev on :3000)"
+shell = "nu -c"
+run = "cargo run -p catapulte -- healthcheck"
+
+
+# =============================================================================
+# secrets:* — fnox contract
+# =============================================================================
+
+[tasks."secrets:check"]
+description = "Resolve the fnox secrets and report which are present (no values printed)"
+shell = "nu -c"
+run = '''
+fnox exec -- nu -c '
+  [CATAPULTE_HTTP_API_KEY CATAPULTE_SENDER_PRIMARY_USERNAME CATAPULTE_SENDER_PRIMARY_PASSWORD]
+  | each {|k| {secret: $k, set: (($env | get -o $k | is-not-empty))} }
+'
+'''
