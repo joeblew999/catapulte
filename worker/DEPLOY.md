@@ -112,6 +112,21 @@ the `default` tenant. This is also how you scale: load spreads across DO
 instances. Sender domains (A) are orthogonal — a tenant may use any verified
 domain.
 
+## Optional features (env vars)
+
+```toml
+[vars]
+# Outbound webhooks: POST every lifecycle event (queued/sent/failed) here.
+CATAPULTE_WEBHOOK_URL   = "https://hooks.example.com/catapulte"
+# CATAPULTE_WEBHOOK_TOKEN sent as `Authorization: Bearer …` (set as a secret).
+# Per-host auth for remote MJML templates (host → Authorization header):
+CATAPULTE_RESOLVER_AUTH = '{"templates.acme.com":"Bearer xyz"}'
+```
+- **Webhooks** are best-effort — a down endpoint never blocks email; the event
+  is always recorded (`GET /events`).
+- **MJML includes**: `<mj-include path="https://…/partial.mjml">` is fetched at
+  render time (no binding needed).
+
 ## Notes / limits
 
 - **Throughput**: a single DO instance ("default") serializes all work. For

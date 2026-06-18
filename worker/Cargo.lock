@@ -174,6 +174,7 @@ name = "catapulte-worker"
 version = "2.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "catapulte-domain",
@@ -620,6 +621,7 @@ version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a92ff9ad398a7d556481a607b912370999bc6441537c90a979c16d73c91a832"
 dependencies = [
+ "async-trait",
  "enum-as-inner",
  "htmlparser",
  "indexmap",

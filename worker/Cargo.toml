@@ -31,9 +31,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "v7", "js"] }
 url = "2"
-# Rendering on wasm: MRML (MJML→HTML, parse+render only — no fs/http loaders)
-# and minijinja for variable interpolation. Both are pure-Rust, wasm-clean.
-mrml = { version = "6.0.1", default-features = false, features = ["parse", "render"] }
+# Rendering on wasm: MRML (MJML→HTML) with async parse so <mj-include> partials
+# resolve via worker::Fetch; minijinja for variable interpolation. Pure-Rust.
+mrml = { version = "6.0.1", default-features = false, features = ["parse", "render", "async"] }
+async-trait = "0.1"
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 # wasm randomness backend for transitive users of getrandom 0.2.
 getrandom = { version = "0.2", features = ["js"] }

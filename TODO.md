@@ -36,14 +36,17 @@ Upstream issue: https://github.com/jdrouet/catapulte/issues/722 (comment posted)
 - [x] wasm `std::time` panics fixed (tower-http layers gated; uuid v4 on wasm).
 - [x] mise tasks + `mise run verify` (nushell, A/B/C) + `DEPLOY.md`.
 - [x] D1 adapter (`outbound-d1`) kept as a multi-writer alternative to the DO.
+- [x] **Outbound webhooks** (`CATAPULTE_WEBHOOK_URL` + optional `_TOKEN`) — composite `EventSink` records to the DO **and** POSTs each lifecycle event (Queued/Sent/Failed) to the webhook, best-effort (a down webhook never blocks email).
+- [x] **MJML includes** — `<mj-include path="https://…">` partials resolve via `worker::Fetch` (mrml async parse + `FetchIncludeLoader`; mrml's async loader is `?Send` on wasm).
+- [x] **Remote-template per-host auth** (`CATAPULTE_RESOLVER_AUTH` JSON host→header) — auth header added when fetching remote templates for matching hosts.
 
-## Remaining (all optional / niche)
+## Remaining (all optional / low-priority)
 
-- [ ] **Outbound webhooks** (`WEBHOOK_*`) — POST delivery events to a configured URL. *The only remaining item with real value.* Plan: a `WEBHOOK_URL` env var; in the alarm after publishing Sent/Failed, `worker::Fetch` POST the event (best-effort), or a composite EventPublisher.
-- [ ] MJML includes (`INCLUDE_LOADER_*`) — `<mj-include>` partials. Minor; needs an mrml include loader backed by R2/Fetch.
-- [ ] Remote-template per-host auth (`RESOLVER_*`) — auth headers when fetching remote templates. Minor.
-- [ ] Periodic orphan sweep for R2 — terminal-delete covers the normal path; a cron sweep would catch DELETE/crash orphans, but needs per-tenant R2 prefixes (cross-tenant enumeration). Low priority.
+- [ ] Periodic orphan sweep for R2 — terminal-delete (done) covers the normal path; a cron sweep would catch DELETE/crash orphans, but needs per-tenant R2 prefixes (cross-tenant enumeration). Low priority.
+- [ ] Webhook HMAC signing — currently optional bearer token only.
 - [ ] **N/A on CF:** NATS inbound (`INBOUND_NATS_*`) — use CF Queues instead. OTEL (`CATAPULTE_OTEL`) — CF observability replaces it (`[observability]` + `wrangler tail`).
+
+Everything functional is now ported. The remaining items are hardening, not features.
 
 ## To go fully live (operator, one-time)
 

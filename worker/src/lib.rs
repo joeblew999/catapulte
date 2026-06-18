@@ -30,7 +30,7 @@ use catapulte_domain::port::sender_usage::SenderUsage;
 use catapulte_domain::port::attachment_fetcher::{AttachmentFetchError, AttachmentFetcher};
 use catapulte_domain::port::attachment_store::{AttachmentReader, AttachmentStore};
 use catapulte_domain::port::clock::Clock;
-use catapulte_domain::port::event_publisher::EventPublisher;
+use catapulte_domain::port::event_publisher::{EventPublisher, EventPublisherError};
 use catapulte_domain::use_case::check_readiness::{CheckReadinessService, CheckReadinessUseCase};
 use catapulte_domain::use_case::list_emails::{ListEmailsService, ListEmailsUseCase};
 use catapulte_domain::use_case::list_events::{ListEventsService, ListEventsUseCase};
@@ -40,9 +40,10 @@ use catapulte_inbound_http::{HttpServerState, ReadinessState, router};
 use catapulte_outbound_attachment_r2::R2AttachmentStore;
 use catapulte_outbound_do::DoStore;
 use tower::ServiceExt;
+use worker::wasm_bindgen::JsValue;
 use worker::{
-    Date, DurableObject, EmailMessage, Env, Headers, Request, Response, Result, State, Storage,
-    durable_object, event,
+    Date, DurableObject, EmailMessage, Env, Fetch, Headers, Method, Request, RequestInit, Response,
+    Result, State, Storage, durable_object, event,
 };
 
 const DO_BINDING: &str = "CATAPULTE_STORE";
@@ -50,6 +51,9 @@ const EMAIL_BINDING: &str = "EMAIL";
 const TEMPLATES_BINDING: &str = "TEMPLATES";
 const ATTACHMENTS_BINDING: &str = "ATTACHMENTS";
 const API_KEY_VAR: &str = "CATAPULTE_HTTP_API_KEY";
+const WEBHOOK_URL_VAR: &str = "CATAPULTE_WEBHOOK_URL";
+const WEBHOOK_TOKEN_VAR: &str = "CATAPULTE_WEBHOOK_TOKEN";
+const RESOLVER_AUTH_VAR: &str = "CATAPULTE_RESOLVER_AUTH";
 const TENANT_HEADER: &str = "X-Catapulte-Tenant";
 const DEFAULT_TENANT: &str = "default";
 const MAX_ATTEMPTS: i64 = 5;
@@ -87,6 +91,73 @@ impl Clock for WasmClock {
     }
 }
 
+/// Event publisher that records to the DO's SQLite **and** (best-effort) POSTs
+/// each lifecycle event to a configured webhook (`CATAPULTE_WEBHOOK_URL`, with
+/// optional `CATAPULTE_WEBHOOK_TOKEN` bearer). A down webhook never blocks email
+/// processing — the record always happens, the POST is fire-and-forget.
+struct EventSink {
+    recorder: DoStore,
+    webhook_url: Option<String>,
+    webhook_token: Option<String>,
+}
+
+impl EventSink {
+    fn new(recorder: DoStore, env: &Env) -> Self {
+        let var = |name: &str| {
+            env.var(name)
+                .ok()
+                .map(|v| v.to_string())
+                .filter(|v| !v.trim().is_empty())
+        };
+        Self {
+            recorder,
+            webhook_url: var(WEBHOOK_URL_VAR),
+            webhook_token: var(WEBHOOK_TOKEN_VAR),
+        }
+    }
+}
+
+impl EventPublisher for EventSink {
+    fn publish(
+        &self,
+        event: &LifecycleEvent,
+    ) -> impl std::future::Future<Output = std::result::Result<(), EventPublisherError>> + Send {
+        // DoStore::publish runs the insert eagerly and returns a ready future,
+        // so the event is recorded synchronously here; only the webhook awaits.
+        let recorded = self.recorder.publish(event);
+        let payload = serde_json::json!({
+            "event_type": event.event_type(),
+            "email_id": event.email_id().as_uuid().to_string(),
+            "payload": event.payload(),
+        })
+        .to_string();
+        let url = self.webhook_url.clone();
+        let token = self.webhook_token.clone();
+        worker::send::SendFuture::new(async move {
+            recorded.await?;
+            if let Some(url) = url {
+                let _ = post_webhook(&url, token.as_deref(), &payload).await;
+            }
+            Ok(())
+        })
+    }
+}
+
+async fn post_webhook(url: &str, token: Option<&str>, body: &str) -> Result<()> {
+    let headers = Headers::new();
+    headers.set("content-type", "application/json")?;
+    if let Some(t) = token {
+        headers.set("authorization", &format!("Bearer {t}"))?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(JsValue::from_str(body)));
+    let req = Request::new_with_init(url, &init)?;
+    Fetch::Request(req).send().await?;
+    Ok(())
+}
+
 /// Fetches remote attachment URLs via `worker::Fetch` (used by the submit
 /// use-case for URL-referenced attachments; uploaded/base64 ones go straight
 /// to the store).
@@ -122,7 +193,7 @@ impl AttachmentFetcher for WorkerAttachmentFetcher {
 // --- app state (the real HttpServerState) -----------------------------------
 
 type SubmitSvc =
-    SubmitEmailService<DoStore, DoStore, DoStore, R2AttachmentStore, WorkerAttachmentFetcher>;
+    SubmitEmailService<DoStore, DoStore, EventSink, R2AttachmentStore, WorkerAttachmentFetcher>;
 
 #[derive(Clone)]
 struct AppState {
@@ -141,7 +212,7 @@ impl AppState {
             submit_email: Arc::new(SubmitEmailService::new(
                 DoStore::new(storage.sql()),
                 DoStore::new(storage.sql()),
-                DoStore::new(storage.sql()),
+                EventSink::new(DoStore::new(storage.sql()), env),
                 R2AttachmentStore::new(env.clone(), ATTACHMENTS_BINDING),
                 WorkerAttachmentFetcher,
             )),
@@ -229,6 +300,8 @@ impl DurableObject for CatapulteStore {
         let store = DoStore::new(self.state.storage().sql());
         store.init_schema()?;
 
+        // Events go through the sink so Sent/Failed also fire the webhook.
+        let sink = EventSink::new(DoStore::new(self.state.storage().sql()), &self.env);
         let now = i64::try_from(Date::now().as_millis()).unwrap_or(i64::MAX);
         for item in store.claim_due(now, 10)? {
             let id = uuid::Uuid::parse_str(&item.email_id).map(EmailId::from);
@@ -239,7 +312,7 @@ impl DurableObject for CatapulteStore {
                     store.set_status(&item.email_id, "sent")?;
                     store.dequeue(&item.email_id)?;
                     if let Ok(id) = id {
-                        let _ = store
+                        let _ = sink
                             .publish(&LifecycleEvent::Sent {
                                 id,
                                 sender_name: sender_name
@@ -255,7 +328,7 @@ impl DurableObject for CatapulteStore {
                     store.set_status(&item.email_id, "failed")?;
                     store.dequeue(&item.email_id)?;
                     if let Ok(id) = id {
-                        let _ = store
+                        let _ = sink
                             .publish(&LifecycleEvent::Failed {
                                 id,
                                 attempt: u32::try_from(item.attempts + 1).unwrap_or(u32::MAX),
@@ -386,15 +459,16 @@ impl CatapulteStore {
                 Ok((text, html))
             }
             BodySource::Mjml(MjmlSource::Inline(src)) => {
-                Ok((None, Some(render_mjml(&interpolate(src, vars)?)?)))
+                Ok((None, Some(render_mjml(&interpolate(src, vars)?).await?)))
             }
             BodySource::Mjml(MjmlSource::Named(name)) => {
                 let src = self.fetch_named_template(name).await?;
-                Ok((None, Some(render_mjml(&interpolate(&src, vars)?)?)))
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?).await?)))
             }
             BodySource::Mjml(MjmlSource::Remote(url)) => {
-                let src = fetch_remote_template(url).await?;
-                Ok((None, Some(render_mjml(&interpolate(&src, vars)?)?)))
+                let auth = resolver_auth(&self.env, url);
+                let src = fetch_remote_template(url, auth.as_deref()).await?;
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?).await?)))
             }
         }
     }
@@ -453,17 +527,49 @@ async fn to_worker_response(
         .with_headers(headers))
 }
 
-async fn fetch_remote_template(url: &url::Url) -> std::result::Result<String, String> {
-    let mut resp = worker::Fetch::Url(url.clone())
-        .send()
-        .await
-        .map_err(|e| format!("fetching remote template: {e}"))?;
+async fn fetch_remote_template(
+    url: &url::Url,
+    auth: Option<&str>,
+) -> std::result::Result<String, String> {
+    // With a per-host auth header (RESOLVER), send a Request carrying it;
+    // otherwise a plain GET.
+    let mut resp = if let Some(auth) = auth {
+        let headers = Headers::new();
+        headers
+            .set("authorization", auth)
+            .map_err(|e| format!("building auth header: {e}"))?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Get).with_headers(headers);
+        let req = Request::new_with_init(url.as_str(), &init)
+            .map_err(|e| format!("building template request: {e}"))?;
+        Fetch::Request(req)
+            .send()
+            .await
+            .map_err(|e| format!("fetching remote template: {e}"))?
+    } else {
+        Fetch::Url(url.clone())
+            .send()
+            .await
+            .map_err(|e| format!("fetching remote template: {e}"))?
+    };
     if resp.status_code() != 200 {
         return Err(format!("remote template returned HTTP {}", resp.status_code()));
     }
     resp.text()
         .await
         .map_err(|e| format!("reading remote template: {e}"))
+}
+
+/// Per-host auth for remote template fetches (RESOLVER). `CATAPULTE_RESOLVER_AUTH`
+/// is a JSON object mapping host → full Authorization header value, e.g.
+/// `{"templates.acme.com":"Bearer xyz"}`. Returns the header for the URL's host.
+fn resolver_auth(env: &Env, url: &url::Url) -> Option<String> {
+    let raw = env.var(RESOLVER_AUTH_VAR).ok()?.to_string();
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(&raw).ok()?;
+    map.get(url.host_str()?).cloned()
 }
 
 fn interpolate(
@@ -475,12 +581,45 @@ fn interpolate(
         .map_err(|e| format!("interpolation failed: {e}"))
 }
 
-fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
-    let parsed = mrml::parse(mjml).map_err(|e| format!("mjml parse failed: {e}"))?;
+async fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
+    // Async parse so <mj-include path="https://..."> partials resolve via Fetch.
+    let opts = std::sync::Arc::new(mrml::prelude::parser::AsyncParserOptions {
+        include_loader: Box::new(FetchIncludeLoader),
+    });
+    let parsed = mrml::async_parse_with_options(mjml, opts)
+        .await
+        .map_err(|e| format!("mjml parse failed: {e}"))?;
     parsed
         .element
         .render(&mrml::prelude::render::RenderOptions::default())
         .map_err(|e| format!("mjml render failed: {e}"))
+}
+
+/// Resolves `<mj-include>` partials by fetching the `path` as a URL via
+/// `worker::Fetch`. mrml's async loader is `?Send` on wasm, so a `!Send` Fetch
+/// future is fine here.
+#[derive(Debug)]
+struct FetchIncludeLoader;
+
+#[async_trait::async_trait(?Send)]
+impl mrml::prelude::parser::loader::AsyncIncludeLoader for FetchIncludeLoader {
+    async fn async_resolve(
+        &self,
+        path: &str,
+    ) -> std::result::Result<String, mrml::prelude::parser::loader::IncludeLoaderError> {
+        use mrml::prelude::parser::loader::IncludeLoaderError;
+        let url = url::Url::parse(path).map_err(|_| IncludeLoaderError::not_found(path))?;
+        let mut resp = Fetch::Url(url)
+            .send()
+            .await
+            .map_err(|_| IncludeLoaderError::not_found(path))?;
+        if resp.status_code() != 200 {
+            return Err(IncludeLoaderError::not_found(path));
+        }
+        resp.text()
+            .await
+            .map_err(|_| IncludeLoaderError::not_found(path))
+    }
 }
 
 /// Outcome of a delivery attempt.
