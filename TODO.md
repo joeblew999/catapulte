@@ -56,16 +56,15 @@ reports `delivery.failed` against CF when the sender domain isn't verified.
 - [x] **MJML includes** (multi-loader) — `<mj-include path="header">` loads `<name>.mjml` from the TEMPLATES R2 bucket; `path="https://…"` is fetched via worker::Fetch. mrml async parse + a WorkerIncludeLoader (mrml async loader is ?Send on wasm). Verified live.
 - [x] **Remote-template per-host auth** (`CATAPULTE_RESOLVER_AUTH` JSON host→header) — auth header added when fetching remote templates for matching hosts.
 
-## Multi-tenant domains (decided)
+## Multi-tenant domains
 
-CF Email Sending has **no domain-onboarding API** — onboarding is dashboard-only
-and each subdomain is a separate onboarding. So:
+Onboarding **is** scriptable after all — the CF API has
+`POST /zones/{zone}/email/sending/subdomains` (the guides only show the
+dashboard). So `mise run domain:add <subdomain>` onboards a sending subdomain;
+CF auto-writes the cf-bounce DKIM/SPF/DMARC (the zone uses CF DNS) → zero-touch.
 
-- **Recommended model:** onboard **one** shared sending domain once
-  (`mail.yourapp.com`, in the CF dashboard — CF writes the cf-bounce DKIM/SPF/
-  DMARC). Tenants are distinct **addresses** under it (`acme@mail.yourapp.com`).
-  Zero per-tenant CF actions. Per-tenant *subdomains* (reputation isolation) are
-  the rare, opt-in, paid-tier path — still a manual dashboard onboard.
+- `mise run domain:add acme.mail.yourzone.com` / `domain:list` / `domain:dns <tag>` / `domain:rm <tag>` (needs `CATAPULTE_MAIL_ZONE`).
+- **Two models, both now easy:** one shared domain + per-tenant addresses (simplest), OR per-tenant subdomains for reputation isolation (now scriptable, no longer manual).
 - **Enforcement (done, in the Worker):** each tenant DO has an allowed-sender
   list; a disallowed `sender` is rejected with 403 before the router. Empty =
   unrestricted. Manage with `mise run tenant:allow <tenant> <pattern>...` /

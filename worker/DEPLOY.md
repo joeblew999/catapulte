@@ -124,9 +124,18 @@ mise run tenant:allow acme mail.acme.test billing@mail.acme.test   # set
 mise run tenant:list  acme                                          # show
 ```
 A pattern with `@` = exact address, else a domain. Empty list = unrestricted.
-A disallowed `sender` is rejected with 403. Recommended domain model: onboard
-**one** sending domain in the CF dashboard (there's no onboarding API) and give
-tenants distinct addresses under it — the allowlist keeps them separated.
+A disallowed `sender` is rejected with 403.
+
+Onboard sending domains/subdomains from the CLI (set `CATAPULTE_MAIL_ZONE` to a
+zone you own; CF auto-writes the cf-bounce DKIM/SPF/DMARC):
+```sh
+mise run domain:add  acme.mail.yourzone.com   # onboard (zero-touch)
+mise run domain:list                          # list onboarded subdomains
+mise run domain:dns  <tag>                     # show its DNS records
+mise run domain:rm   <tag>                     # remove
+```
+Either model works: one shared domain + per-tenant addresses (simplest), or a
+subdomain per tenant for reputation isolation.
 
 **(C) Multi-tenant isolation** — send the `X-Catapulte-Tenant: <id>` header.
 Each tenant gets its own Durable Object: isolated SQLite, queue, alarm and

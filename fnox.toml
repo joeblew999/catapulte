@@ -36,6 +36,10 @@ CATAPULTE_WORKER_URL= { provider = "keychain", value = "CATAPULTE_WORKER_URL" }
 CATAPULTE_SMOKE_SENDER    = { provider = "keychain", value = "CATAPULTE_SMOKE_SENDER" }
 CATAPULTE_SMOKE_RECIPIENT = { provider = "keychain", value = "CATAPULTE_SMOKE_RECIPIENT" }
 
+# Base zone (a domain you own in CF) for `mise run domain:*` — onboards
+# sending subdomains under it. Set the zone NAME (resolved to an id via the API).
+CATAPULTE_MAIL_ZONE = { provider = "keychain", value = "CATAPULTE_MAIL_ZONE" }
+
 # HTTP API auth — when set, every endpoint except /health requires
 # `Authorization: Bearer <this>`. Optional; unset = open API (dev only).
 CATAPULTE_HTTP_API_KEY = { provider = "keychain", value = "CATAPULTE_HTTP_API_KEY" }

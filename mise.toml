@@ -147,6 +147,30 @@ docker compose -f compose/local-dev.yml down -v | ignore
 exit $result.exit_code
 '''
 
+# --- domain:* — onboard CF Email Sending subdomains (per-tenant, zero-touch) ---
+# Requires CATAPULTE_MAIL_ZONE (a zone you own in CF). CF auto-writes the
+# cf-bounce DKIM/SPF/DMARC records since the zone uses CF DNS.
+
+[tasks."domain:add"]
+description = "Onboard a sending subdomain: mise run domain:add <subdomain.within.your.zone>"
+shell = "nu -c"
+run = "fnox exec -- nu scripts/domain.nu add {{arg(name='subdomain')}}"
+
+[tasks."domain:list"]
+description = "List onboarded sending subdomains"
+shell = "nu -c"
+run = "fnox exec -- nu scripts/domain.nu list"
+
+[tasks."domain:dns"]
+description = "Show a sending subdomain's expected DNS records: mise run domain:dns <tag>"
+shell = "nu -c"
+run = "fnox exec -- nu scripts/domain.nu dns {{arg(name='tag')}}"
+
+[tasks."domain:rm"]
+description = "Remove a sending subdomain: mise run domain:rm <tag>"
+shell = "nu -c"
+run = "fnox exec -- nu scripts/domain.nu rm {{arg(name='tag')}}"
+
 [tasks."tenant:allow"]
 description = "Set a tenant's allowed senders: mise run tenant:allow <tenant> <pattern>... (domain or addr; empty = unrestricted)"
 shell = "nu -c"
