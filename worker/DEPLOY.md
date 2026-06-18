@@ -9,28 +9,28 @@ storage + queue + scheduler, the real `inbound-http` router is the HTTP surface,
 MRML renders the body, and the Email Service binding sends. No D1, no Queues,
 no cron.
 
-## Prerequisites (one-time, manual — can't be scripted)
+## Prerequisites (one-time)
 
 1. **A Cloudflare account** with Workers (paid plan — DO SQLite + Email Service
    require it).
-2. **A verified sender domain.** The Email Service `send_email` binding only
-   sends from a domain you've verified. In the CF dashboard:
-   Email → Email Sending (or Email Routing) → add & verify your domain.
-   The `sender` in every request must be at that domain.
-3. `fnox` creds set once (shared across all joeblew999 repos):
+2. `fnox` creds set once (shared across all joeblew999 repos):
    ```sh
    fnox set -p keychain CLOUDFLARE_API_TOKEN  <token>
    fnox set -p keychain CLOUDFLARE_ACCOUNT_ID <account-id>
    ```
 
+Real delivery also needs a verified sender domain — but that's now scriptable
+too (`mise run domain:scan` / `domain:add`, see [Multi-domain](#multi-domain--multi-tenant-a--b--c)),
+not a manual dashboard step.
+
 ## One-time bootstrap
 
 ```sh
-mise run deploy:bootstrap     # creates the R2 attachments bucket
+mise run deploy:bootstrap     # creates the R2 buckets (attachments + templates)
 ```
 
-(That's just `r2:create` today. The Durable Object and its SQLite class are
-provisioned automatically by the first `wrangler deploy` via the
+(That's `r2:create` — both R2 buckets. The Durable Object and its SQLite class
+are provisioned automatically by the first `wrangler deploy` via the
 `[[migrations]] new_sqlite_classes` entry in `wrangler.toml` — nothing to run.)
 
 Optional — lock the HTTP API behind a bearer token:
@@ -144,15 +144,21 @@ the `default` tenant. This is also how you scale: load spreads across DO
 instances. Sender domains (A) are orthogonal — a tenant may use any verified
 domain.
 
-## Optional features (env vars)
+## Optional features (env)
+
+Non-secret config goes in `[vars]` (wrangler.toml); anything carrying a
+credential must be a **secret** (`wrangler secret put …`) — `[vars]` is
+plaintext in the committed config.
 
 ```toml
+# wrangler.toml [vars] — non-secret:
 [vars]
-# Outbound webhooks: POST every lifecycle event (queued/sent/failed) here.
-CATAPULTE_WEBHOOK_URL   = "https://hooks.example.com/catapulte"
-# CATAPULTE_WEBHOOK_TOKEN sent as `Authorization: Bearer …` (set as a secret).
-# Per-host auth for remote MJML templates (host → Authorization header):
-CATAPULTE_RESOLVER_AUTH = '{"templates.acme.com":"Bearer xyz"}'
+CATAPULTE_WEBHOOK_URL = "https://hooks.example.com/catapulte"   # event fan-out
+```
+```sh
+# secrets (credential-bearing):
+wrangler secret put CATAPULTE_WEBHOOK_TOKEN     # sent as Authorization: Bearer …
+wrangler secret put CATAPULTE_RESOLVER_AUTH     # {"templates.acme.com":"Bearer xyz"} — per-host remote-template auth
 ```
 - **Webhooks** are best-effort — a down endpoint never blocks email; the event
   is always recorded (`GET /events`).
@@ -163,8 +169,10 @@ CATAPULTE_RESOLVER_AUTH = '{"templates.acme.com":"Bearer xyz"}'
 
 ## Notes / limits
 
-- **Throughput**: a single DO instance ("default") serializes all work. For
-  scale, shard by sender/tenant (change `id_from_name` in `worker/src/lib.rs`).
-- **Named templates** are read from the `TEMPLATES` R2 bucket (`<name>.mjml`);
-  add `[[r2_buckets]] binding = "TEMPLATES"` and upload templates if you use
-  them. **Remote templates** (body `mjml_remote`) need no binding.
+- **Throughput / scale**: work is serialized *within* a tenant (its single DO)
+  but runs in parallel *across* tenants — each `X-Catapulte-Tenant` is its own
+  DO. So you scale by spreading load across tenants; a single hot tenant is the
+  only serialization point.
+- **Named templates / includes**: the `TEMPLATES` R2 bucket is already bound in
+  `wrangler.toml` — just upload partials (`<name>.mjml`). Remote templates
+  (`mjml_remote`) and URL `<mj-include>`s need no bucket.

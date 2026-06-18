@@ -12,7 +12,11 @@ the domain core. Pick up here.
 | `feat/outbound-cloudflare` | option A — native catapulte sends *via* CF through a Worker shim (issue #722) |
 | `feat/worker-runtime` | **option B — catapulte runs entirely on CF Workers** (the main line; everything below lives here) |
 
-Upstream issue: https://github.com/jdrouet/catapulte/issues/722 (comment posted).
+Upstream issues filed (offering PRs): catapulte
+[#722](https://github.com/jdrouet/catapulte/issues/722) (CF Email Service sender)
++ [#732](https://github.com/jdrouet/catapulte/issues/732) (running fully on CF),
+and mrml [#650](https://github.com/jdrouet/mrml/issues/650) (wasm fetch include
+loader).
 
 ## Testing (native + CF share one test)
 
@@ -63,7 +67,7 @@ Onboarding **is** scriptable after all — the CF API has
 dashboard). So `mise run domain:add <subdomain>` onboards a sending subdomain;
 CF auto-writes the cf-bounce DKIM/SPF/DMARC (the zone uses CF DNS) → zero-touch.
 
-- `mise run domain:add acme.mail.yourzone.com` / `domain:list` / `domain:dns <tag>` / `domain:rm <tag>` (needs `CATAPULTE_MAIL_ZONE`).
+- `mise run domain:scan` — list every account zone's existing email setup (Sending/Routing/MX) to find a free one. Then `domain:add <subdomain>` / `domain:list` / `domain:dns <tag>` / `domain:rm <tag>` (needs `CATAPULTE_MAIL_ZONE`).
 - **Two models, both now easy:** one shared domain + per-tenant addresses (simplest), OR per-tenant subdomains for reputation isolation (now scriptable, no longer manual).
 - **Enforcement (done, in the Worker):** each tenant DO has an allowed-sender
   list; a disallowed `sender` is rejected with 403 before the router. Empty =
@@ -82,9 +86,12 @@ Everything functional is now ported. The remaining items are hardening, not feat
 
 ## To go fully live (operator, one-time)
 
-1. Verify a sender domain in the CF dashboard (Email) — required for real delivery.
-2. `mise run deploy:bootstrap` (creates the R2 bucket).
-3. `mise run deploy` → `mise run verify`.
+1. `mise run deploy:bootstrap` — create the R2 buckets (attachments + templates).
+2. `mise run deploy` → `mise run verify` (worker is live; delivery not yet).
+3. Pick a sender domain: `mise run domain:scan` → set `CATAPULTE_MAIL_ZONE` to a
+   free zone → `mise run domain:add mail.<zone>` (CF writes the DNS).
+4. `fnox set -p keychain CATAPULTE_SMOKE_SENDER hello@mail.<zone>` →
+   `mise run test:cf` → real `delivery.succeeded`.
 
 ## Gotchas worth remembering
 
