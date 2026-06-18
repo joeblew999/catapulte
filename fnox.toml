@@ -21,6 +21,11 @@ type = "keychain"
 service = "fnox"
 
 [secrets]
+# Shared Cloudflare creds — used by the worker:* / d1:* tasks (wrangler).
+# Same item names across every joeblew999 repo (one CF account).
+CLOUDFLARE_API_TOKEN  = { provider = "keychain", value = "CLOUDFLARE_API_TOKEN" }
+CLOUDFLARE_ACCOUNT_ID = { provider = "keychain", value = "CLOUDFLARE_ACCOUNT_ID" }
+
 # HTTP API auth — when set, every endpoint except /health requires
 # `Authorization: Bearer <this>`. Optional; unset = open API (dev only).
 CATAPULTE_HTTP_API_KEY = { provider = "keychain", value = "CATAPULTE_HTTP_API_KEY" }

@@ -15,6 +15,9 @@
 "cargo:cargo-machete" = "latest"
 # Local SMTP sink for the dev loop — catches mail without a real provider.
 "aqua:axllent/mailpit" = "latest"
+# Cloudflare Workers runtime (feat/worker-runtime): wasm bundler + CLI.
+"cargo:worker-build" = "^0.8"
+"npm:wrangler" = "4.90.1"
 
 [env]
 RUST_BACKTRACE = "1"
@@ -128,3 +131,59 @@ fnox exec -- nu -c '
   | each {|k| {secret: $k, set: (($env | get -o $k | is-not-empty))} }
 '
 '''
+
+
+# =============================================================================
+# worker:* / d1:* — Cloudflare Workers runtime (feat/worker-runtime)
+# =============================================================================
+# The worker/ crate is wasm32-only and excluded from the native workspace, so
+# these tasks run inside worker/ (dir = "worker"). Deploys go through fnox so
+# the CF token is injected, never written to disk.
+
+[tasks."worker:check"]
+description = "Type-check the worker crate against wasm32"
+dir = "worker"
+shell = "nu -c"
+run = "cargo check --target wasm32-unknown-unknown"
+
+[tasks."worker:build"]
+description = "Bundle the worker to a deployable wasm shim (build/worker/shim.mjs)"
+dir = "worker"
+shell = "nu -c"
+run = "worker-build --release"
+
+[tasks."worker:dev"]
+description = "Run the worker locally (wrangler dev). Talks to local D1 by default."
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler dev"
+
+[tasks."worker:deploy"]
+description = "Deploy the worker to Cloudflare. Fill database_id in wrangler.toml first (see d1:create)."
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler deploy"
+
+[tasks."worker:tail"]
+description = "Tail the deployed worker's logs"
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler tail"
+
+[tasks."d1:create"]
+description = "Create the D1 database (run once). Paste the printed database_id into worker/wrangler.toml."
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler d1 create catapulte"
+
+[tasks."d1:migrate"]
+description = "Apply D1 migrations from worker/migrations"
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler d1 migrations apply catapulte"
+
+[tasks."d1:migrate:local"]
+description = "Apply D1 migrations to the local dev database"
+dir = "worker"
+shell = "nu -c"
+run = "fnox exec -- wrangler d1 migrations apply catapulte --local"
