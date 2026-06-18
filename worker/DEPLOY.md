@@ -106,6 +106,17 @@ is the catch-all); if its quota is exhausted in the window the email is
 `quota_range` ∈ `hourly|daily|weekly|monthly`. On CF there's one egress, so a
 "sender" is a from-domain + quota, not an SMTP relay.
 
+**Sender allowlist (multi-tenant safety)** — each tenant can be restricted to
+specific from-addresses/domains so one tenant can't send as another:
+```sh
+mise run tenant:allow acme mail.acme.test billing@mail.acme.test   # set
+mise run tenant:list  acme                                          # show
+```
+A pattern with `@` = exact address, else a domain. Empty list = unrestricted.
+A disallowed `sender` is rejected with 403. Recommended domain model: onboard
+**one** sending domain in the CF dashboard (there's no onboarding API) and give
+tenants distinct addresses under it — the allowlist keeps them separated.
+
 **(C) Multi-tenant isolation** — send the `X-Catapulte-Tenant: <id>` header.
 Each tenant gets its own Durable Object: isolated SQLite, queue, alarm and
 data (verified — one tenant's `GET /emails` never sees another's). No header →

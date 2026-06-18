@@ -56,6 +56,23 @@ reports `delivery.failed` against CF when the sender domain isn't verified.
 - [x] **MJML includes** (multi-loader) — `<mj-include path="header">` loads `<name>.mjml` from the TEMPLATES R2 bucket; `path="https://…"` is fetched via worker::Fetch. mrml async parse + a WorkerIncludeLoader (mrml async loader is ?Send on wasm). Verified live.
 - [x] **Remote-template per-host auth** (`CATAPULTE_RESOLVER_AUTH` JSON host→header) — auth header added when fetching remote templates for matching hosts.
 
+## Multi-tenant domains (decided)
+
+CF Email Sending has **no domain-onboarding API** — onboarding is dashboard-only
+and each subdomain is a separate onboarding. So:
+
+- **Recommended model:** onboard **one** shared sending domain once
+  (`mail.yourapp.com`, in the CF dashboard — CF writes the cf-bounce DKIM/SPF/
+  DMARC). Tenants are distinct **addresses** under it (`acme@mail.yourapp.com`).
+  Zero per-tenant CF actions. Per-tenant *subdomains* (reputation isolation) are
+  the rare, opt-in, paid-tier path — still a manual dashboard onboard.
+- **Enforcement (done, in the Worker):** each tenant DO has an allowed-sender
+  list; a disallowed `sender` is rejected with 403 before the router. Empty =
+  unrestricted. Manage with `mise run tenant:allow <tenant> <pattern>...` /
+  `mise run tenant:list <tenant>` (admin route `GET/PUT /admin/allowed-senders`,
+  API-key gated). Verified live.
+- Provisioning stays OUT of the send Worker (least privilege).
+
 ## Remaining (all optional / low-priority)
 
 - [ ] Periodic orphan sweep for R2 — terminal-delete (done) covers the normal path; a cron sweep would catch DELETE/crash orphans, but needs per-tenant R2 prefixes (cross-tenant enumeration). Low priority.
