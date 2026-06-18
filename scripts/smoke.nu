@@ -13,7 +13,11 @@
 
 def main [base: string] {
   let sender = ($env.CATAPULTE_SMOKE_SENDER? | default "smoke-test@example.com")
-  print $"smoke: ($base)  sender=($sender)"
+  # Run under a throwaway tenant so the test is fully isolated and self-cleaning
+  # — its data lives in its own DO and never touches a real tenant.
+  let tenant = $"smoke-(random uuid)"
+  let hdr = ["X-Catapulte-Tenant" $tenant]
+  print $"smoke: ($base)  sender=($sender)  tenant=($tenant)"
 
   # 1. wait for readiness
   mut ready = false
@@ -32,13 +36,13 @@ def main [base: string] {
     subject: "Smoke Test",
     body: {kind: "plain", text: "Hello from the smoke test"}
   }
-  let id = (http post --content-type application/json $"($base)/emails" $body | get id)
+  let id = (http post --content-type application/json --headers $hdr $"($base)/emails" $body | get id)
   print $"  submitted: ($id)"
 
   # 3. confirm delivery via the lifecycle events
   mut outcome = "timeout"
   for _ in 1..30 {
-    let types = (try { http get $"($base)/emails/($id)/events" | get events | get event_type } catch { [] })
+    let types = (try { http get --headers $hdr $"($base)/emails/($id)/events" | get events | get event_type } catch { [] })
     if ("delivery.succeeded" in $types) { $outcome = "succeeded"; break }
     if ("delivery.failed" in $types) { $outcome = "failed"; break }
     sleep 1sec
@@ -48,7 +52,7 @@ def main [base: string] {
     print "  SMOKE PASS: email delivered"
   } else if $outcome == "failed" {
     let reason = (try {
-      http get $"($base)/emails/($id)/events" | get events
+      http get --headers $hdr $"($base)/emails/($id)/events" | get events
       | where event_type == "delivery.failed" | get 0.payload.reason
     } catch { "unknown" })
     print $"  SMOKE FAIL: delivery.failed — ($reason)"
