@@ -22,11 +22,14 @@ use std::time::Duration;
 
 use base64::Engine;
 use catapulte_domain::entity::body::{BodySource, MjmlSource};
+use catapulte_domain::entity::email::EmailId;
+use catapulte_domain::entity::error_class::ErrorClass;
 use catapulte_domain::entity::lifecycle_event::LifecycleEvent;
+use catapulte_domain::entity::sender::SenderName;
 use catapulte_domain::port::attachment_fetcher::{AttachmentFetchError, AttachmentFetcher};
 use catapulte_domain::port::attachment_store::AttachmentReader;
 use catapulte_domain::port::clock::Clock;
-use catapulte_domain::port::event_publisher::{EventPublisher, EventPublisherError};
+use catapulte_domain::port::event_publisher::EventPublisher;
 use catapulte_domain::use_case::check_readiness::{CheckReadinessService, CheckReadinessUseCase};
 use catapulte_domain::use_case::list_emails::{ListEmailsService, ListEmailsUseCase};
 use catapulte_domain::use_case::list_events::{ListEventsService, ListEventsUseCase};
@@ -69,17 +72,6 @@ impl Clock for WasmClock {
     }
 }
 
-/// Events aren't recorded yet (status lives in `emails.status`).
-struct NoopEventPublisher;
-impl EventPublisher for NoopEventPublisher {
-    fn publish(
-        &self,
-        _event: &LifecycleEvent,
-    ) -> impl std::future::Future<Output = std::result::Result<(), EventPublisherError>> + Send {
-        async { Ok(()) }
-    }
-}
-
 /// Fetches remote attachment URLs via `worker::Fetch` (used by the submit
 /// use-case for URL-referenced attachments; uploaded/base64 ones go straight
 /// to the store).
@@ -114,13 +106,8 @@ impl AttachmentFetcher for WorkerAttachmentFetcher {
 
 // --- app state (the real HttpServerState) -----------------------------------
 
-type SubmitSvc = SubmitEmailService<
-    DoStore,
-    DoStore,
-    NoopEventPublisher,
-    R2AttachmentStore,
-    WorkerAttachmentFetcher,
->;
+type SubmitSvc =
+    SubmitEmailService<DoStore, DoStore, DoStore, R2AttachmentStore, WorkerAttachmentFetcher>;
 
 #[derive(Clone)]
 struct AppState {
@@ -139,7 +126,7 @@ impl AppState {
             submit_email: Arc::new(SubmitEmailService::new(
                 DoStore::new(storage.sql()),
                 DoStore::new(storage.sql()),
-                NoopEventPublisher,
+                DoStore::new(storage.sql()),
                 R2AttachmentStore::new(env.clone(), ATTACHMENTS_BINDING),
                 WorkerAttachmentFetcher,
             )),
@@ -229,14 +216,36 @@ impl DurableObject for CatapulteStore {
 
         let now = i64::try_from(Date::now().as_millis()).unwrap_or(i64::MAX);
         for item in store.claim_due(now, 10)? {
+            let id = uuid::Uuid::parse_str(&item.email_id).map(EmailId::from);
             match self.deliver(&store, &item.email_id).await {
                 Ok(()) => {
                     store.set_status(&item.email_id, "sent")?;
                     store.dequeue(&item.email_id)?;
+                    if let Ok(id) = id {
+                        let _ = store
+                            .publish(&LifecycleEvent::Sent {
+                                id,
+                                sender_name: SenderName::new("cloudflare"),
+                                correlation_id: None,
+                            })
+                            .await;
+                    }
                 }
-                Err(_) if item.attempts + 1 >= MAX_ATTEMPTS => {
+                Err(e) if item.attempts + 1 >= MAX_ATTEMPTS => {
                     store.set_status(&item.email_id, "failed")?;
                     store.dequeue(&item.email_id)?;
+                    if let Ok(id) = id {
+                        let _ = store
+                            .publish(&LifecycleEvent::Failed {
+                                id,
+                                attempt: u32::try_from(item.attempts + 1).unwrap_or(u32::MAX),
+                                reason: e.to_string(),
+                                error_class: ErrorClass::Delivery,
+                                sender_name: None,
+                                correlation_id: None,
+                            })
+                            .await;
+                    }
                 }
                 Err(_) => store.reschedule(&item.email_id, now + backoff_ms(item.attempts + 1))?,
             }

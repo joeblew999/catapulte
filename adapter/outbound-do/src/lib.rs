@@ -19,8 +19,10 @@ use catapulte_domain::entity::attachment::{AttachmentRef, BlobRef};
 use catapulte_domain::entity::body::BodySource;
 use catapulte_domain::entity::email::{EmailId, RecipientKind};
 use catapulte_domain::entity::envelope::Envelope;
+use catapulte_domain::entity::lifecycle_event::LifecycleEvent;
 use catapulte_domain::entity::sender::SenderName;
 use catapulte_domain::port::email_queue::{AckToken, DequeuedEmail, EmailQueue, EmailQueueError};
+use catapulte_domain::port::event_publisher::{EventPublisher, EventPublisherError};
 use catapulte_domain::port::email_repository::{
     EmailRecord, EmailRepository, EmailRepositoryError, EmailStatus, ListEmailsParams, SaveResult,
 };
@@ -57,6 +59,16 @@ CREATE TABLE IF NOT EXISTS email_queue (
     attempts   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS email_queue_run_at ON email_queue(run_at_ms);
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+    id            TEXT PRIMARY KEY NOT NULL,
+    email_id      TEXT NOT NULL,
+    event_type    TEXT NOT NULL,
+    payload       TEXT,
+    sender_name   TEXT,
+    error_class   TEXT,
+    created_at_ms INTEGER NOT NULL DEFAULT (CAST(unixepoch('now','subsec')*1000 AS INTEGER))
+);
+CREATE INDEX IF NOT EXISTS lifecycle_events_email ON lifecycle_events(email_id, created_at_ms);
 ";
 
 // --- row shapes -------------------------------------------------------------
@@ -555,13 +567,124 @@ impl EmailQueue for DoStore {
     }
 }
 
+impl EventPublisher for DoStore {
+    fn publish(
+        &self,
+        event: &LifecycleEvent,
+    ) -> impl Future<Output = Result<(), EventPublisherError>> + Send {
+        let r = self
+            .sql
+            .exec(
+                "INSERT INTO lifecycle_events \
+                 (id, email_id, event_type, payload, sender_name, error_class) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                vec![
+                    uuid::Uuid::now_v7().to_string().into(),
+                    event.email_id().as_uuid().to_string().into(),
+                    event.event_type().to_owned().into(),
+                    event.payload().to_string().into(),
+                    event.sender_name().map(|s| s.as_str().to_owned()).into(),
+                    event.error_class().map(|e| e.as_str().to_owned()).into(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| EventPublisherError::Publish {
+                source: anyhow::anyhow!("publish: {e}"),
+            });
+        async move { r }
+    }
+}
+
+#[derive(Deserialize)]
+struct EventRow {
+    id: String,
+    email_id: String,
+    event_type: String,
+    payload: Option<String>,
+    sender_name: Option<String>,
+    error_class: Option<String>,
+    created_at_ms: f64,
+}
+
 impl EventRepository for DoStore {
     fn list_events(
         &self,
-        _params: ListEventsParams,
+        params: ListEventsParams,
     ) -> impl Future<Output = Result<Vec<EventRecord>, EventRepositoryError>> + Send {
-        // Lifecycle events aren't recorded yet; status lives in emails.status.
-        async { Ok(Vec::new()) }
+        let result = self.list_events_sync(&params);
+        async move { result }
+    }
+}
+
+impl DoStore {
+    fn list_events_sync(
+        &self,
+        params: &ListEventsParams,
+    ) -> Result<Vec<EventRecord>, EventRepositoryError> {
+        let ev_err = |ctx: &str, e: String| EventRepositoryError::Storage {
+            source: anyhow::anyhow!("{ctx}: {e}"),
+        };
+        let mut sql = String::from(
+            "SELECT id, email_id, event_type, payload, sender_name, error_class, created_at_ms \
+             FROM lifecycle_events WHERE 1=1",
+        );
+        let mut binds: Vec<SqlStorageValue> = Vec::new();
+        if let Some(email_id) = params.email_id {
+            sql.push_str(" AND email_id = ?");
+            binds.push(email_id.as_uuid().to_string().into());
+        }
+        if let Some(event_type) = &params.event_type {
+            sql.push_str(" AND event_type = ?");
+            binds.push(event_type.clone().into());
+        }
+        if let Some(sender_name) = &params.sender_name {
+            sql.push_str(" AND sender_name = ?");
+            binds.push(sender_name.clone().into());
+        }
+        if let Some(error_class) = &params.error_class {
+            sql.push_str(" AND error_class = ?");
+            binds.push(error_class.as_str().to_owned().into());
+        }
+        if let Some(after) = params.after_ms {
+            sql.push_str(" AND created_at_ms > ?");
+            binds.push(SqlStorageValue::Integer(after));
+        }
+        if let Some(before) = params.before_ms {
+            sql.push_str(" AND created_at_ms < ?");
+            binds.push(SqlStorageValue::Integer(before));
+        }
+        sql.push_str(" ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?");
+        binds.push(SqlStorageValue::Integer(i64::from(params.limit)));
+        binds.push(SqlStorageValue::Integer(i64::from(params.offset)));
+
+        let rows: Vec<EventRow> = self
+            .sql
+            .exec(&sql, binds)
+            .map_err(|e| ev_err("listing events", e.to_string()))?
+            .to_array()
+            .map_err(|e| ev_err("decoding events", e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id = uuid::Uuid::parse_str(&row.id)
+                    .map_err(|e| ev_err("parsing event id", e.to_string()))?;
+                let email_uuid = uuid::Uuid::parse_str(&row.email_id)
+                    .map_err(|e| ev_err("parsing email id", e.to_string()))?;
+                let payload = row
+                    .payload
+                    .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok());
+                #[allow(clippy::cast_possible_truncation)]
+                Ok(EventRecord {
+                    id,
+                    email_id: EmailId::from(email_uuid),
+                    event_type: row.event_type,
+                    payload,
+                    sender_name: row.sender_name.map(SenderName::new),
+                    error_class: row.error_class,
+                    created_at_ms: row.created_at_ms as i64,
+                })
+            })
+            .collect()
     }
 }
 
