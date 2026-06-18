@@ -9,9 +9,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# `server` (default) pulls the tokio-net + axum serve stack used by
+# InboundHttpServer::run(). With `--no-default-features`, only `router()` and
+# its types build — and they compile to wasm32 (the Workers runtime reuses the
+# exact same router). axum/tokio are pinned default-features=false so the
+# workspace's net/rt features don't leak in and pull mio.
+[features]
+default = ["server"]
+server = ["tokio/net", "tokio/rt", "axum/tokio", "axum/http1"]
+
 [dependencies]
 anyhow = { workspace = true }
-axum = { workspace = true, features = ["multipart"] }
+axum = { version = "0.8", default-features = false, features = ["json", "query", "multipart"] }
 base64 = "0.22"
 bytes = "1"
 catapulte-domain = { path = "../../domain" }
@@ -20,8 +29,8 @@ futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { version = "2.0" }
-tokio = { workspace = true, features = ["net"] }
-tokio-util = { workspace = true, features = ["io"] }
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io"] }
 tower-http = { workspace = true, features = ["timeout"] }
 tracing = { workspace = true }
 url = { version = "2.5" }

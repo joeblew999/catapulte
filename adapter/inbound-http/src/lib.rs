@@ -16,6 +16,7 @@ use catapulte_domain::use_case::list_emails::ListEmailsUseCase;
 use catapulte_domain::use_case::list_events::ListEventsUseCase;
 use catapulte_domain::use_case::list_senders::ListSendersUseCase;
 use catapulte_domain::use_case::submit_email::SubmitEmailUseCase;
+#[cfg(feature = "server")]
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
@@ -177,6 +178,7 @@ impl InboundHttpConfig {
         })
     }
 
+    #[cfg(feature = "server")]
     #[must_use]
     pub fn build(self) -> InboundHttpServer {
         InboundHttpServer {
@@ -187,12 +189,14 @@ impl InboundHttpConfig {
     }
 }
 
+#[cfg(feature = "server")]
 pub struct InboundHttpServer {
     address: SocketAddr,
     api_key: Option<String>,
     request_timeout: std::time::Duration,
 }
 
+#[cfg(feature = "server")]
 impl InboundHttpServer {
     /// # Errors
     ///
