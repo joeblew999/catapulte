@@ -30,6 +30,12 @@ CLOUDFLARE_ACCOUNT_ID = { provider = "keychain", value = "CLOUDFLARE_ACCOUNT_ID"
 # verify task can find it without an env export).
 CATAPULTE_WORKER_URL= { provider = "keychain", value = "CATAPULTE_WORKER_URL" }
 
+# Smoke-test sender/recipient. Set CATAPULTE_SMOKE_SENDER to an address on a
+# CF-verified (onboarded) domain to make `mise run test:cf` deliver for real
+# (delivery.succeeded). Until then the default unverified sender correctly fails.
+CATAPULTE_SMOKE_SENDER    = { provider = "keychain", value = "CATAPULTE_SMOKE_SENDER" }
+CATAPULTE_SMOKE_RECIPIENT = { provider = "keychain", value = "CATAPULTE_SMOKE_RECIPIENT" }
+
 # HTTP API auth — when set, every endpoint except /health requires
 # `Authorization: Bearer <this>`. Optional; unset = open API (dev only).
 CATAPULTE_HTTP_API_KEY = { provider = "keychain", value = "CATAPULTE_HTTP_API_KEY" }

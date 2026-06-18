@@ -11,8 +11,22 @@
 # Exits non-zero on failure (CI-friendly). Sender defaults to a verified-domain
 # placeholder; override with CATAPULTE_SMOKE_SENDER for a real send.
 
+# Config from env, else fnox, else a fallback — so once you've onboarded a
+# domain and run `fnox set -p keychain CATAPULTE_SMOKE_SENDER you@mail.you.com`,
+# `mise run test:cf` goes green with no flags.
+def cfg [name: string, fallback: string] {
+  let e = ($env | get -o $name | default "" | str trim)
+  if ($e | is-not-empty) { return $e }
+  # `complete` captures the exit code and never raises, so an unset fnox key
+  # just falls through to the fallback instead of failing the run.
+  let r = (^fnox get $name | complete)
+  let f = (if $r.exit_code == 0 { $r.stdout | str trim } else { "" })
+  if ($f | is-not-empty) { $f } else { $fallback }
+}
+
 def main [base: string] {
-  let sender = ($env.CATAPULTE_SMOKE_SENDER? | default "smoke-test@example.com")
+  let sender = (cfg "CATAPULTE_SMOKE_SENDER" "smoke-test@example.com")
+  let recipient = (cfg "CATAPULTE_SMOKE_RECIPIENT" "recipient@example.com")
   # Run under a throwaway tenant so the test is fully isolated and self-cleaning
   # — its data lives in its own DO and never touches a real tenant.
   let tenant = $"smoke-(random uuid)"
@@ -32,7 +46,7 @@ def main [base: string] {
   # 2. submit
   let body = {
     sender: $sender,
-    recipients: [{kind: "to", address: "recipient@example.com"}],
+    recipients: [{kind: "to", address: $recipient}],
     subject: "Smoke Test",
     body: {kind: "plain", text: "Hello from the smoke test"}
   }

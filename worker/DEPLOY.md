@@ -59,6 +59,17 @@ export CATAPULTE_WORKER_URL=https://catapulte-worker.<you>.workers.dev
 mise run verify
 ```
 
+To make `mise run test:cf` actually **deliver** (go green), point the smoke at a
+sender on a CF-onboarded domain — once, via env or fnox:
+```sh
+fnox set -p keychain CATAPULTE_SMOKE_SENDER    you@mail.yourdomain.com
+fnox set -p keychain CATAPULTE_SMOKE_RECIPIENT inbox@example.com   # optional
+mise run test:cf      # now → delivery.succeeded
+```
+Until a verified sender is set, the smoke uses an unverified placeholder and
+correctly reports `delivery.failed` (the test is working — there's just no
+domain yet).
+
 `mise run verify` is an end-to-end smoke test (nushell): health, submit, list,
 events, **[B]** `/senders` reporting, and **[C]** tenant isolation (posts to a
 random tenant and asserts it's invisible to `default`). Prints `verify: PASS`
