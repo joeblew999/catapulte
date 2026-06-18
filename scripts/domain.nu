@@ -28,8 +28,32 @@ def zone_id [] {
   $id
 }
 
+# Scan every zone in the account and report existing email setup, so it's easy
+# to pick one that's free for catapulte. Read-only.
+def scan_all [] {
+  let zones = (http get --headers (hdr) $"($API)/zones?per_page=50").result
+  let rows = ($zones | each {|z|
+    let sending = (try {
+      (http get --headers (hdr) $"($API)/zones/($z.id)/email/sending/subdomains").result
+      | get name | str join ", "
+    } catch { "" })
+    let routing = (try {
+      (http get --headers (hdr) $"($API)/zones/($z.id)/email/routing").result.enabled
+    } catch { false })
+    let mx = (try {
+      (http get --headers (hdr) $"($API)/zones/($z.id)/dns_records?type=MX&per_page=50").result | length
+    } catch { 0 })
+    let free = ((($sending | is-empty)) and (not $routing) and ($mx == 0))
+    {zone: $z.name, sending: (if ($sending | is-empty) { "-" } else { $sending }), routing: $routing, mx_records: $mx, free: $free}
+  })
+  $rows | sort-by free --reverse | print
+  let free = ($rows | where free | get zone)
+  print $"free \(no Sending/Routing/MX — clean pick): ($free | str join ', ')"
+}
+
 def main [action: string, ...args: string] {
   if ((token) | is-empty) { print "no CLOUDFLARE_API_TOKEN (run via fnox exec / mise)"; exit 1 }
+  if $action == "scan" { scan_all; return }
   let zone = (zone_id)
   let base = $"($API)/zones/($zone)/email/sending/subdomains"
 

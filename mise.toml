@@ -156,6 +156,11 @@ description = "Onboard a sending subdomain: mise run domain:add <subdomain.withi
 shell = "nu -c"
 run = "fnox exec -- nu scripts/domain.nu add {{arg(name='subdomain')}}"
 
+[tasks."domain:scan"]
+description = "Scan ALL account zones for existing email setup (Sending/Routing/MX) — find a free domain"
+shell = "nu -c"
+run = "fnox exec -- nu scripts/domain.nu scan"
+
 [tasks."domain:list"]
 description = "List onboarded sending subdomains"
 shell = "nu -c"
