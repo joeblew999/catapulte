@@ -31,6 +31,7 @@ use worker::{
 
 const DO_BINDING: &str = "CATAPULTE_STORE";
 const EMAIL_BINDING: &str = "EMAIL";
+const TEMPLATES_BINDING: &str = "TEMPLATES";
 const MAX_ATTEMPTS: i64 = 5;
 
 #[event(fetch)]
@@ -77,9 +78,15 @@ impl DurableObject for CatapulteStore {
         let now = i64::try_from(Date::now().as_millis()).unwrap_or(i64::MAX);
         for item in store.claim_due(now, 10)? {
             match self.deliver(&store, &item.email_id).await {
-                Ok(()) => store.dequeue(&item.email_id)?,
-                // Give up after MAX_ATTEMPTS — drop from the queue.
-                Err(_) if item.attempts + 1 >= MAX_ATTEMPTS => store.dequeue(&item.email_id)?,
+                Ok(()) => {
+                    store.set_status(&item.email_id, "sent")?;
+                    store.dequeue(&item.email_id)?;
+                }
+                // Give up after MAX_ATTEMPTS — mark failed and drop from the queue.
+                Err(_) if item.attempts + 1 >= MAX_ATTEMPTS => {
+                    store.set_status(&item.email_id, "failed")?;
+                    store.dequeue(&item.email_id)?;
+                }
                 Err(_) => store.reschedule(&item.email_id, now + backoff_ms(item.attempts + 1))?,
             }
         }
@@ -128,8 +135,10 @@ impl CatapulteStore {
             return Ok(()); // row gone — nothing to deliver
         };
 
-        let (text, html) =
-            render_body(&email.body, &email.variables).map_err(worker::Error::RustError)?;
+        let (text, html) = self
+            .render(&email.body, &email.variables)
+            .await
+            .map_err(worker::Error::RustError)?;
         let subject = email.subject.as_deref().unwrap_or("");
         let sender = self.env.send_email(EMAIL_BINDING)?;
 
@@ -140,29 +149,69 @@ impl CatapulteStore {
         }
         Ok(())
     }
-}
 
-/// Interpolates variables (minijinja) and renders MJML bodies (mrml) to a
-/// `(text, html)` pair. Named/remote templates are not resolvable in the worker
-/// yet — they error so the queue retries/drops rather than sending blanks.
-fn render_body(
-    body: &BodySource,
-    vars: &serde_json::Map<String, serde_json::Value>,
-) -> std::result::Result<(Option<String>, Option<String>), String> {
-    match body {
-        BodySource::Plain(p) => {
-            let text = p.text().map(|t| interpolate(t, vars)).transpose()?;
-            let html = p.html().map(|h| interpolate(h, vars)).transpose()?;
-            Ok((text, html))
-        }
-        BodySource::Mjml(MjmlSource::Inline(src)) => {
-            let mjml = interpolate(src, vars)?;
-            Ok((None, Some(render_mjml(&mjml)?)))
-        }
-        BodySource::Mjml(MjmlSource::Named(_) | MjmlSource::Remote(_)) => {
-            Err("named/remote MJML templates are not supported in the worker yet".to_owned())
+    /// Resolves the template source, interpolates variables (minijinja) and
+    /// renders MJML (mrml) to a `(text, html)` pair.
+    /// - plain: interpolate text/html directly
+    /// - inline MJML: interpolate then render
+    /// - named MJML: fetch `<name>.mjml` from the `TEMPLATES` R2 bucket
+    /// - remote MJML: fetch the URL via `worker::Fetch`
+    async fn render(
+        &self,
+        body: &BodySource,
+        vars: &serde_json::Map<String, serde_json::Value>,
+    ) -> std::result::Result<(Option<String>, Option<String>), String> {
+        match body {
+            BodySource::Plain(p) => {
+                let text = p.text().map(|t| interpolate(t, vars)).transpose()?;
+                let html = p.html().map(|h| interpolate(h, vars)).transpose()?;
+                Ok((text, html))
+            }
+            BodySource::Mjml(MjmlSource::Inline(src)) => {
+                Ok((None, Some(render_mjml(&interpolate(src, vars)?)?)))
+            }
+            BodySource::Mjml(MjmlSource::Named(name)) => {
+                let src = self.fetch_named_template(name).await?;
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?)?)))
+            }
+            BodySource::Mjml(MjmlSource::Remote(url)) => {
+                let src = fetch_remote_template(url).await?;
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?)?)))
+            }
         }
     }
+
+    async fn fetch_named_template(&self, name: &str) -> std::result::Result<String, String> {
+        let bucket = self
+            .env
+            .bucket(TEMPLATES_BINDING)
+            .map_err(|e| format!("TEMPLATES bucket binding missing: {e}"))?;
+        let object = bucket
+            .get(format!("{name}.mjml"))
+            .execute()
+            .await
+            .map_err(|e| format!("fetching template {name}: {e}"))?
+            .ok_or_else(|| format!("named template not found: {name}"))?;
+        object
+            .body()
+            .ok_or_else(|| format!("named template {name} has no body"))?
+            .text()
+            .await
+            .map_err(|e| format!("reading template {name}: {e}"))
+    }
+}
+
+async fn fetch_remote_template(url: &url::Url) -> std::result::Result<String, String> {
+    let mut resp = worker::Fetch::Url(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("fetching remote template: {e}"))?;
+    if resp.status_code() != 200 {
+        return Err(format!("remote template returned HTTP {}", resp.status_code()));
+    }
+    resp.text()
+        .await
+        .map_err(|e| format!("reading remote template: {e}"))
 }
 
 fn interpolate(

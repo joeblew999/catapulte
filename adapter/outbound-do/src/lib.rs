@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS emails (
     recipients      TEXT NOT NULL,
     body            TEXT NOT NULL,
     variables       TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued',
     created_at_ms   INTEGER NOT NULL DEFAULT (CAST(unixepoch('now','subsec')*1000 AS INTEGER))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS emails_idempotency_key
@@ -60,7 +61,16 @@ struct EmailRow {
     subject: Option<String>,
     sender: String,
     recipients: String,
+    status: String,
     created_at_ms: f64,
+}
+
+fn status_from_str(s: &str) -> EmailStatus {
+    match s {
+        "sent" => EmailStatus::Sent,
+        "failed" => EmailStatus::Failed,
+        _ => EmailStatus::Queued,
+    }
 }
 
 #[derive(Deserialize)]
@@ -187,6 +197,18 @@ impl DoStore {
         self.sql.exec(
             "DELETE FROM email_queue WHERE email_id = ?",
             vec![email_id.into()],
+        )?;
+        Ok(())
+    }
+
+    /// Marks an email's terminal delivery status (`"sent"` / `"failed"`).
+    ///
+    /// # Errors
+    /// Returns an error if the update fails.
+    pub fn set_status(&self, email_id: &str, status: &str) -> WResult<()> {
+        self.sql.exec(
+            "UPDATE emails SET status = ? WHERE id = ?",
+            vec![status.into(), email_id.into()],
         )?;
         Ok(())
     }
@@ -355,7 +377,7 @@ impl DoStore {
         params: &ListEmailsParams,
     ) -> Result<Vec<EmailRecord>, EmailRepositoryError> {
         let mut sql = String::from(
-            "SELECT id, idempotency_key, subject, sender, recipients, created_at_ms \
+            "SELECT id, idempotency_key, subject, sender, recipients, status, created_at_ms \
              FROM emails WHERE 1=1",
         );
         let mut binds: Vec<SqlStorageValue> = Vec::new();
@@ -370,6 +392,17 @@ impl DoStore {
         if let Some(before) = params.before_ms {
             sql.push_str(" AND created_at_ms < ?");
             binds.push(SqlStorageValue::Integer(before));
+        }
+        if let Some(status) = params.status {
+            sql.push_str(" AND status = ?");
+            binds.push(
+                match status {
+                    EmailStatus::Sent => "sent",
+                    EmailStatus::Failed => "failed",
+                    EmailStatus::Queued => "queued",
+                }
+                .into(),
+            );
         }
         sql.push_str(" ORDER BY created_at_ms DESC, id DESC LIMIT ? OFFSET ?");
         binds.push(SqlStorageValue::Integer(i64::from(params.limit)));
@@ -396,7 +429,7 @@ impl DoStore {
                     sender: row.sender,
                     recipients: recipients_from_dto(recipients),
                     created_at_ms: row.created_at_ms as i64,
-                    status: EmailStatus::Queued,
+                    status: status_from_str(&row.status),
                 })
             })
             .collect()

@@ -87,6 +87,7 @@ dependencies = [
  "mrml",
  "serde",
  "serde_json",
+ "url",
  "wasm-bindgen",
  "worker",
 ]
