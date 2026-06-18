@@ -20,6 +20,11 @@ new_sqlite_classes = ["CatapulteStore"]
 [[send_email]]
 name = "EMAIL"
 
+# R2 bucket for attachment blobs. Create with: wrangler r2 bucket create catapulte-attachments
+[[r2_buckets]]
+binding = "ATTACHMENTS"
+bucket_name = "catapulte-attachments"
+
 [observability]
 enabled = true
 head_sampling_rate = 1.0

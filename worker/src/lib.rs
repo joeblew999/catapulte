@@ -20,13 +20,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use catapulte_domain::entity::attachment::BlobRef;
+use base64::Engine;
 use catapulte_domain::entity::body::{BodySource, MjmlSource};
 use catapulte_domain::entity::lifecycle_event::LifecycleEvent;
 use catapulte_domain::port::attachment_fetcher::{AttachmentFetchError, AttachmentFetcher};
-use catapulte_domain::port::attachment_store::{
-    AttachmentReader, AttachmentStore, AttachmentStoreError, PutResult,
-};
+use catapulte_domain::port::attachment_store::AttachmentReader;
 use catapulte_domain::port::clock::Clock;
 use catapulte_domain::port::event_publisher::{EventPublisher, EventPublisherError};
 use catapulte_domain::use_case::check_readiness::{CheckReadinessService, CheckReadinessUseCase};
@@ -35,6 +33,7 @@ use catapulte_domain::use_case::list_events::{ListEventsService, ListEventsUseCa
 use catapulte_domain::use_case::list_senders::{ListSendersService, ListSendersUseCase};
 use catapulte_domain::use_case::submit_email::{SubmitEmailService, SubmitEmailUseCase};
 use catapulte_inbound_http::{HttpServerState, ReadinessState, router};
+use catapulte_outbound_attachment_r2::R2AttachmentStore;
 use catapulte_outbound_do::DoStore;
 use tower::ServiceExt;
 use worker::{
@@ -45,6 +44,7 @@ use worker::{
 const DO_BINDING: &str = "CATAPULTE_STORE";
 const EMAIL_BINDING: &str = "EMAIL";
 const TEMPLATES_BINDING: &str = "TEMPLATES";
+const ATTACHMENTS_BINDING: &str = "ATTACHMENTS";
 const API_KEY_VAR: &str = "CATAPULTE_HTTP_API_KEY";
 const MAX_ATTEMPTS: i64 = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -80,56 +80,47 @@ impl EventPublisher for NoopEventPublisher {
     }
 }
 
-/// Attachments aren't accepted on the worker submit path yet — inert.
-struct NoAttachmentStore;
-impl AttachmentStore for NoAttachmentStore {
-    fn put(
-        &self,
-        _reader: AttachmentReader,
-    ) -> impl std::future::Future<Output = std::result::Result<PutResult, AttachmentStoreError>> + Send
-    {
-        async {
-            Err(AttachmentStoreError::Io {
-                source: anyhow::anyhow!("attachments are not supported on the worker yet"),
-            })
-        }
-    }
-
-    fn get(
-        &self,
-        _blob: &BlobRef,
-    ) -> impl std::future::Future<Output = std::result::Result<AttachmentReader, AttachmentStoreError>>
-    + Send {
-        async { Err(AttachmentStoreError::NotFound) }
-    }
-
-    fn delete(
-        &self,
-        _blob: &BlobRef,
-    ) -> impl std::future::Future<Output = std::result::Result<(), AttachmentStoreError>> + Send {
-        async { Ok(()) }
-    }
-}
-
-struct NoAttachmentFetcher;
-impl AttachmentFetcher for NoAttachmentFetcher {
+/// Fetches remote attachment URLs via `worker::Fetch` (used by the submit
+/// use-case for URL-referenced attachments; uploaded/base64 ones go straight
+/// to the store).
+struct WorkerAttachmentFetcher;
+impl AttachmentFetcher for WorkerAttachmentFetcher {
     fn fetch(
         &self,
-        _url: &url::Url,
+        url: &url::Url,
     ) -> impl std::future::Future<Output = std::result::Result<AttachmentReader, AttachmentFetchError>>
     + Send {
-        async {
-            Err(AttachmentFetchError::Fetch {
-                source: anyhow::anyhow!("attachment fetch is not supported on the worker yet"),
-            })
-        }
+        let url = url.clone();
+        worker::send::SendFuture::new(async move {
+            let mut resp = worker::Fetch::Url(url)
+                .send()
+                .await
+                .map_err(|e| AttachmentFetchError::Fetch {
+                    source: anyhow::anyhow!("fetch: {e}"),
+                })?;
+            if resp.status_code() != 200 {
+                return Err(AttachmentFetchError::Fetch {
+                    source: anyhow::anyhow!("HTTP {}", resp.status_code()),
+                });
+            }
+            let bytes = resp.bytes().await.map_err(|e| AttachmentFetchError::Fetch {
+                source: anyhow::anyhow!("read: {e}"),
+            })?;
+            let reader: AttachmentReader = Box::pin(std::io::Cursor::new(bytes));
+            Ok(reader)
+        })
     }
 }
 
 // --- app state (the real HttpServerState) -----------------------------------
 
-type SubmitSvc =
-    SubmitEmailService<DoStore, DoStore, NoopEventPublisher, NoAttachmentStore, NoAttachmentFetcher>;
+type SubmitSvc = SubmitEmailService<
+    DoStore,
+    DoStore,
+    NoopEventPublisher,
+    R2AttachmentStore,
+    WorkerAttachmentFetcher,
+>;
 
 #[derive(Clone)]
 struct AppState {
@@ -141,16 +132,16 @@ struct AppState {
 }
 
 impl AppState {
-    /// Builds the state over the DO's SQLite. Each service gets its own
-    /// `DoStore` handle (all point at the same embedded database).
-    fn new(storage: &Storage) -> Self {
+    /// Builds the state over the DO's SQLite + the R2 attachment bucket. Each
+    /// service gets its own `DoStore` handle (all point at the same database).
+    fn new(storage: &Storage, env: &Env) -> Self {
         Self {
             submit_email: Arc::new(SubmitEmailService::new(
                 DoStore::new(storage.sql()),
                 DoStore::new(storage.sql()),
                 NoopEventPublisher,
-                NoAttachmentStore,
-                NoAttachmentFetcher,
+                R2AttachmentStore::new(env.clone(), ATTACHMENTS_BINDING),
+                WorkerAttachmentFetcher,
             )),
             list_emails: Arc::new(ListEmailsService::new(DoStore::new(storage.sql()))),
             list_events: Arc::new(ListEventsService::new(DoStore::new(storage.sql()))),
@@ -210,7 +201,7 @@ impl DurableObject for CatapulteStore {
             .map(|v| v.to_string())
             .filter(|v| !v.is_empty());
         let app = router(
-            AppState::new(&storage),
+            AppState::new(&storage, &self.env),
             api_key,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
         );
@@ -278,10 +269,34 @@ impl CatapulteStore {
             .await
             .map_err(worker::Error::RustError)?;
         let subject = email.subject.as_deref().unwrap_or("");
-        let sender = self.env.send_email(EMAIL_BINDING)?;
 
+        // Pull attachment bytes from R2 and base64-encode them for the MIME.
+        let mut parts: Vec<MimeAttachment> = Vec::with_capacity(email.attachments.len());
+        if !email.attachments.is_empty() {
+            let store = R2AttachmentStore::new(self.env.clone(), ATTACHMENTS_BINDING);
+            for att in &email.attachments {
+                let bytes = store
+                    .load_bytes(&att.blob.key)
+                    .await
+                    .map_err(worker::Error::RustError)?;
+                parts.push(MimeAttachment {
+                    filename: att.filename.clone(),
+                    content_type: att.content_type.clone(),
+                    base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                });
+            }
+        }
+
+        let sender = self.env.send_email(EMAIL_BINDING)?;
         for (_, to) in &email.recipients {
-            let raw = build_mime(&email.sender, to, subject, text.as_deref(), html.as_deref());
+            let raw = build_mime(
+                &email.sender,
+                to,
+                subject,
+                text.as_deref(),
+                html.as_deref(),
+                &parts,
+            );
             let message = EmailMessage::new(&email.sender, to, &raw)?;
             sender.send(&message).await?;
         }
@@ -397,22 +412,61 @@ fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("mjml render failed: {e}"))
 }
 
-/// Builds a minimal RFC822 message (CRLF, multipart/alternative when both parts
-/// are present).
-fn build_mime(from: &str, to: &str, subject: &str, text: Option<&str>, html: Option<&str>) -> String {
-    let headers = format!("From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\n");
+/// A rendered, base64-encoded attachment ready for the MIME body.
+struct MimeAttachment {
+    filename: String,
+    content_type: String,
+    base64: String,
+}
+
+/// Builds an RFC822 message (CRLF). The body is `multipart/alternative` when
+/// both text + html are present; with attachments the whole thing is wrapped in
+/// `multipart/mixed`.
+fn build_mime(
+    from: &str,
+    to: &str,
+    subject: &str,
+    text: Option<&str>,
+    html: Option<&str>,
+    attachments: &[MimeAttachment],
+) -> String {
+    let top = format!("From: {from}\r\nTo: {to}\r\nSubject: {subject}\r\nMIME-Version: 1.0\r\n");
+    let body_part = build_body_part(text, html);
+
+    if attachments.is_empty() {
+        return format!("{top}{body_part}\r\n");
+    }
+
+    let mixed = "catapulte-mixed-boundary";
+    let mut out = format!("{top}Content-Type: multipart/mixed; boundary=\"{mixed}\"\r\n\r\n");
+    out.push_str(&format!("--{mixed}\r\n{body_part}\r\n"));
+    for a in attachments {
+        out.push_str(&format!(
+            "--{mixed}\r\nContent-Type: {}\r\n\
+             Content-Disposition: attachment; filename=\"{}\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            a.content_type, a.filename, a.base64
+        ));
+    }
+    out.push_str(&format!("--{mixed}--\r\n"));
+    out
+}
+
+/// The body section as a MIME part (its own Content-Type header + content, no
+/// trailing CRLF) — either a `multipart/alternative` or a single part.
+fn build_body_part(text: Option<&str>, html: Option<&str>) -> String {
     match (text, html) {
         (Some(t), Some(h)) => {
             let b = "catapulte-alt-boundary";
             format!(
-                "{headers}Content-Type: multipart/alternative; boundary=\"{b}\"\r\n\r\n\
+                "Content-Type: multipart/alternative; boundary=\"{b}\"\r\n\r\n\
                  --{b}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{t}\r\n\
-                 --{b}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{h}\r\n--{b}--\r\n"
+                 --{b}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{h}\r\n--{b}--"
             )
         }
-        (None, Some(h)) => format!("{headers}Content-Type: text/html; charset=utf-8\r\n\r\n{h}\r\n"),
-        (Some(t), None) => format!("{headers}Content-Type: text/plain; charset=utf-8\r\n\r\n{t}\r\n"),
-        (None, None) => format!("{headers}Content-Type: text/plain; charset=utf-8\r\n\r\n\r\n"),
+        (None, Some(h)) => format!("Content-Type: text/html; charset=utf-8\r\n\r\n{h}"),
+        (Some(t), None) => format!("Content-Type: text/plain; charset=utf-8\r\n\r\n{t}"),
+        (None, None) => "Content-Type: text/plain; charset=utf-8\r\n\r\n".to_owned(),
     }
 }
 

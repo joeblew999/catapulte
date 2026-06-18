@@ -109,6 +109,7 @@ pub struct StoredEmail {
     pub recipients: Vec<(RecipientKind, String)>,
     pub body: BodySource,
     pub variables: serde_json::Map<String, serde_json::Value>,
+    pub attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Deserialize)]
@@ -243,8 +244,9 @@ impl DoStore {
             serde_json::from_str(&row.recipients).map_err(|e| err("decoding recipients", e))?;
         let deser: EnvelopeBodyDtoDeser =
             serde_json::from_str(&row.body).map_err(|e| err("decoding body", e))?;
-        let (source_dto, _attachments) = deser.split();
+        let (source_dto, attachment_dtos) = deser.split();
         let body = BodySource::try_from(source_dto).map_err(|e| err("rebuilding body", e))?;
+        let attachments = attachment_dtos.into_iter().map(AttachmentRef::from).collect();
         let variables: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(&row.variables).unwrap_or_default();
 
@@ -254,6 +256,7 @@ impl DoStore {
             recipients: recipients_from_dto(recipients),
             body,
             variables,
+            attachments,
         }))
     }
 

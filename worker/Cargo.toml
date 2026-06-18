@@ -20,6 +20,8 @@ wasm-bindgen = "0.2"
 anyhow = "1"
 catapulte-domain = { path = "../domain" }
 catapulte-outbound-do = { path = "../adapter/outbound-do" }
+catapulte-outbound-attachment-r2 = { path = "../adapter/outbound-attachment-r2" }
+base64 = "0.22"
 # The real HTTP surface, reused (no `server` feature → just router()).
 catapulte-inbound-http = { path = "../adapter/inbound-http", default-features = false }
 # Serve the axum Router inside the DO: ServiceExt::oneshot + Body.

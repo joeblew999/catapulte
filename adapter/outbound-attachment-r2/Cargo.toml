@@ -1,0 +1,18 @@
+# Standalone (excluded from the native workspace): wasm32-only AttachmentStore
+# over the Cloudflare R2 binding. Built via worker-build.
+[package]
+name = "catapulte-outbound-attachment-r2"
+version = "2.0.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+anyhow = "1"
+catapulte-domain = { path = "../../domain" }
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+uuid = { version = "1", features = ["v7", "js"] }
+worker = { version = "0.8" }
+# Bridges the !Send R2 handle/futures to the Send+Sync AttachmentStore port.
+send_wrapper = "0.6"

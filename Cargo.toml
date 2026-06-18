@@ -29,6 +29,7 @@ exclude = [
     "worker",
     "adapter/outbound-d1",
     "adapter/outbound-do",
+    "adapter/outbound-attachment-r2",
 ]
 
 [workspace.package]
