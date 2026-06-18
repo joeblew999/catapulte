@@ -52,12 +52,18 @@ wrangler prints the deployed URL (e.g. `https://catapulte-worker.<you>.workers.d
 ## Verify
 
 ```sh
+# tell verify where the worker is (once) — either of:
+fnox set -p keychain CATAPULTE_WORKER_URL https://catapulte-worker.<you>.workers.dev
 export CATAPULTE_WORKER_URL=https://catapulte-worker.<you>.workers.dev
-mise run verify               # GET /health/live, POST a test email, GET /emails
+
+mise run verify
 ```
 
-If you set an API key, add `-H "Authorization: Bearer <key>"` to the `/emails`
-calls (the `verify` task hits the open path; adjust for your auth).
+`mise run verify` is an end-to-end smoke test (nushell): health, submit, list,
+events, **[B]** `/senders` reporting, and **[C]** tenant isolation (posts to a
+random tenant and asserts it's invisible to `default`). Prints `verify: PASS`
+and exits non-zero on failure, so it's CI-friendly. It hits the open API; if you
+set an API key, the protected routes will 401 — unset it for verification.
 
 Watch logs while testing:
 ```sh

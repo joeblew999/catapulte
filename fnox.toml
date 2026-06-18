@@ -26,6 +26,10 @@ service = "fnox"
 CLOUDFLARE_API_TOKEN  = { provider = "keychain", value = "CLOUDFLARE_API_TOKEN" }
 CLOUDFLARE_ACCOUNT_ID = { provider = "keychain", value = "CLOUDFLARE_ACCOUNT_ID" }
 
+# Deployed worker URL — used by `mise run verify` (not secret, kept here so the
+# verify task can find it without an env export).
+CATAPULTE_WORKER_URL= { provider = "keychain", value = "CATAPULTE_WORKER_URL" }
+
 # HTTP API auth — when set, every endpoint except /health requires
 # `Authorization: Bearer <this>`. Optional; unset = open API (dev only).
 CATAPULTE_HTTP_API_KEY = { provider = "keychain", value = "CATAPULTE_HTTP_API_KEY" }

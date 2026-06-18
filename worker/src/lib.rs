@@ -28,7 +28,7 @@ use catapulte_domain::entity::lifecycle_event::LifecycleEvent;
 use catapulte_domain::entity::sender::{QuotaRange, SenderConfig, SenderName, SenderQuota};
 use catapulte_domain::port::sender_usage::SenderUsage;
 use catapulte_domain::port::attachment_fetcher::{AttachmentFetchError, AttachmentFetcher};
-use catapulte_domain::port::attachment_store::AttachmentReader;
+use catapulte_domain::port::attachment_store::{AttachmentReader, AttachmentStore};
 use catapulte_domain::port::clock::Clock;
 use catapulte_domain::port::event_publisher::EventPublisher;
 use catapulte_domain::use_case::check_readiness::{CheckReadinessService, CheckReadinessUseCase};
@@ -248,6 +248,8 @@ impl DurableObject for CatapulteStore {
                             })
                             .await;
                     }
+                    // GC: an email's attachments are dead once it's terminal.
+                    self.gc_attachments(&store, &item.email_id).await;
                 }
                 Err(e) if item.attempts + 1 >= MAX_ATTEMPTS => {
                     store.set_status(&item.email_id, "failed")?;
@@ -264,6 +266,7 @@ impl DurableObject for CatapulteStore {
                             })
                             .await;
                     }
+                    self.gc_attachments(&store, &item.email_id).await;
                 }
                 Err(_) => store.reschedule(&item.email_id, now + backoff_ms(item.attempts + 1))?,
             }
@@ -281,6 +284,22 @@ impl DurableObject for CatapulteStore {
 }
 
 impl CatapulteStore {
+    /// Deletes a terminal email's attachment blobs from R2 (immediate GC — once
+    /// delivered or permanently failed the blobs are dead). Best-effort: errors
+    /// are ignored so they never block the queue.
+    async fn gc_attachments(&self, store: &DoStore, email_id: &str) {
+        let Ok(Some(email)) = store.load_envelope(email_id) else {
+            return;
+        };
+        if email.attachments.is_empty() {
+            return;
+        }
+        let r2 = R2AttachmentStore::new(self.env.clone(), ATTACHMENTS_BINDING);
+        for att in &email.attachments {
+            let _ = r2.delete(&att.blob).await;
+        }
+    }
+
     /// Renders the email and sends it via the Email Service binding — one
     /// message per recipient. The sender domain must be verified in CF.
     ///
