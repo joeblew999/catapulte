@@ -271,20 +271,34 @@ impl DurableObject for CatapulteStore {
         let storage = self.state.storage();
         DoStore::new(storage.sql()).init_schema()?;
 
+        let path = req.path();
+
+        // Worker-specific admin endpoint (not part of catapulte's API): manage
+        // the tenant's allowed-sender list.
+        if path.starts_with("/admin/allowed-senders") {
+            return self.handle_allowed_senders(&mut req).await;
+        }
+
+        let is_post = req.method() == Method::Post;
+        let body = req.bytes().await?;
+
+        // Multi-tenant safety: reject a sender this tenant isn't allowed to use
+        // (clean 403, before the router). Non-JSON bodies skip this check.
+        if is_post && (path == "/emails" || path == "/emails/batch") {
+            if let Some(resp) = self.enforce_senders(&path, &body)? {
+                return Ok(resp);
+            }
+        }
+
         // Serve the real catapulte router over the DO-backed app state.
-        let api_key = self
-            .env
-            .var(API_KEY_VAR)
-            .ok()
-            .map(|v| v.to_string())
-            .filter(|v| !v.is_empty());
+        let api_key = self.api_key();
         let app = router(
             AppState::new(&storage, &self.env),
             api_key,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
         );
 
-        let axum_req = to_axum_request(&mut req).await?;
+        let axum_req = to_axum_request(&req, body)?;
         let axum_resp = app
             .oneshot(axum_req)
             .await
@@ -362,6 +376,85 @@ impl DurableObject for CatapulteStore {
 }
 
 impl CatapulteStore {
+    fn api_key(&self) -> Option<String> {
+        self.env
+            .var(API_KEY_VAR)
+            .ok()
+            .map(|v| v.to_string())
+            .filter(|v| !v.trim().is_empty())
+    }
+
+    /// `GET`/`PUT /admin/allowed-senders` — manage this tenant's sender
+    /// allowlist. Gated by the same API key as the rest of the API (if set).
+    async fn handle_allowed_senders(&self, req: &mut Request) -> Result<Response> {
+        if let Some(key) = self.api_key() {
+            let auth = req
+                .headers()
+                .get("authorization")
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if auth != format!("Bearer {key}") {
+                return Response::error("unauthorized", 401);
+            }
+        }
+        let store = DoStore::new(self.state.storage().sql());
+        store.init_schema()?;
+        match req.method() {
+            Method::Get => {
+                let list = store
+                    .list_allowed_senders()
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+                Response::from_json(&serde_json::json!({ "allowed_senders": list }))
+            }
+            Method::Put => {
+                let patterns: Vec<String> = req.json().await?;
+                store
+                    .set_allowed_senders(&patterns)
+                    .map_err(|e| worker::Error::RustError(e.to_string()))?;
+                Response::from_json(&serde_json::json!({ "allowed_senders": patterns }))
+            }
+            _ => Response::error("method not allowed", 405),
+        }
+    }
+
+    /// Returns `Some(403)` if any sender in the (JSON) submit body isn't allowed
+    /// for this tenant; `None` to proceed. Non-JSON bodies (multipart) skip.
+    fn enforce_senders(&self, path: &str, body: &[u8]) -> Result<Option<Response>> {
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Ok(None);
+        };
+        let senders: Vec<String> = if path == "/emails/batch" {
+            json.get("emails")
+                .and_then(|e| e.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| e.get("sender").and_then(|s| s.as_str()).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            json.get("sender")
+                .and_then(|s| s.as_str())
+                .map(|s| vec![s.to_owned()])
+                .unwrap_or_default()
+        };
+
+        let store = DoStore::new(self.state.storage().sql());
+        for sender in &senders {
+            let allowed = store
+                .is_sender_allowed(sender)
+                .map_err(|e| worker::Error::RustError(e.to_string()))?;
+            if !allowed {
+                return Ok(Some(Response::error(
+                    format!("sender not allowed for this tenant: {sender}"),
+                    403,
+                )?));
+            }
+        }
+        Ok(None)
+    }
+
     /// Deletes a terminal email's attachment blobs from R2 (immediate GC — once
     /// delivered or permanently failed the blobs are dead). Best-effort: errors
     /// are ignored so they never block the queue.
@@ -499,7 +592,7 @@ impl CatapulteStore {
 }
 
 /// Converts a Workers request into an axum request the reused router can serve.
-async fn to_axum_request(req: &mut Request) -> Result<axum::http::Request<axum::body::Body>> {
+fn to_axum_request(req: &Request, body: Vec<u8>) -> Result<axum::http::Request<axum::body::Body>> {
     let method = axum::http::Method::from_bytes(req.method().to_string().as_bytes())
         .unwrap_or(axum::http::Method::GET);
     let uri = req.url().map_or_else(|_| req.path(), |u| u.to_string());
@@ -507,7 +600,6 @@ async fn to_axum_request(req: &mut Request) -> Result<axum::http::Request<axum::
     for (name, value) in req.headers() {
         builder = builder.header(name, value);
     }
-    let body = req.bytes().await?;
     builder
         .body(axum::body::Body::from(body))
         .map_err(|e| worker::Error::RustError(format!("building request: {e}")))

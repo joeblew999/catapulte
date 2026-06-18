@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS lifecycle_events (
     created_at_ms INTEGER NOT NULL DEFAULT (CAST(unixepoch('now','subsec')*1000 AS INTEGER))
 );
 CREATE INDEX IF NOT EXISTS lifecycle_events_email ON lifecycle_events(email_id, created_at_ms);
+CREATE TABLE IF NOT EXISTS allowed_senders (
+    pattern TEXT PRIMARY KEY NOT NULL
+);
 ";
 
 // --- row shapes -------------------------------------------------------------
@@ -105,6 +108,11 @@ struct BodyRow {
 #[derive(Deserialize)]
 struct RunAtRow {
     run_at_ms: f64,
+}
+
+#[derive(Deserialize)]
+struct PatternRow {
+    pattern: String,
 }
 
 /// A queue entry that is due for a delivery attempt.
@@ -232,6 +240,53 @@ impl DoStore {
             vec![email_id.into()],
         )?;
         Ok(())
+    }
+
+    // --- per-tenant sender allowlist (multi-tenant safety) ------------------
+    // The DO instance *is* the tenant, so this list is naturally tenant-scoped.
+    // Empty list = unrestricted (so tenants without config keep working). A
+    // pattern with `@` matches an exact address; otherwise it matches a domain.
+
+    /// Replaces the tenant's allowed-sender patterns.
+    ///
+    /// # Errors
+    /// Returns an error if the write fails.
+    pub fn set_allowed_senders(&self, patterns: &[String]) -> WResult<()> {
+        self.sql.exec("DELETE FROM allowed_senders", None)?;
+        for p in patterns {
+            self.sql.exec(
+                "INSERT OR IGNORE INTO allowed_senders (pattern) VALUES (?)",
+                vec![p.clone().into()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Lists the tenant's allowed-sender patterns.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn list_allowed_senders(&self) -> WResult<Vec<String>> {
+        let rows: Vec<PatternRow> = self
+            .sql
+            .exec("SELECT pattern FROM allowed_senders ORDER BY pattern", None)?
+            .to_array()?;
+        Ok(rows.into_iter().map(|r| r.pattern).collect())
+    }
+
+    /// Whether `sender` is allowed. Unrestricted when no patterns are set.
+    ///
+    /// # Errors
+    /// Returns an error if the query fails.
+    pub fn is_sender_allowed(&self, sender: &str) -> WResult<bool> {
+        let patterns = self.list_allowed_senders()?;
+        if patterns.is_empty() {
+            return Ok(true);
+        }
+        let domain = sender.rsplit('@').next().unwrap_or("");
+        Ok(patterns
+            .iter()
+            .any(|p| if p.contains('@') { p == sender } else { p == domain }))
     }
 
     /// Marks an email's terminal delivery status (`"sent"` / `"failed"`).

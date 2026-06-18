@@ -147,6 +147,16 @@ docker compose -f compose/local-dev.yml down -v | ignore
 exit $result.exit_code
 '''
 
+[tasks."tenant:allow"]
+description = "Set a tenant's allowed senders: mise run tenant:allow <tenant> <pattern>... (domain or addr; empty = unrestricted)"
+shell = "nu -c"
+run = "nu scripts/tenant.nu allow {{arg(name='tenant')}} {{arg(name='patterns', var=true)}}"
+
+[tasks."tenant:list"]
+description = "Show a tenant's allowed senders: mise run tenant:list <tenant>"
+shell = "nu -c"
+run = "nu scripts/tenant.nu list {{arg(name='tenant')}}"
+
 [tasks."test:cf"]
 description = "Shared smoke against the deployed Worker (CATAPULTE_WORKER_URL or fnox; needs a verified sender for a PASS)"
 shell = "nu -c"
