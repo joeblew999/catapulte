@@ -14,6 +14,22 @@ the domain core. Pick up here.
 
 Upstream issue: https://github.com/jdrouet/catapulte/issues/722 (comment posted).
 
+## Testing (native + CF share one test)
+
+`scripts/smoke.nu <base-url>` is a single end-to-end smoke test (submit → confirm
+delivery via `/events`) that runs against **any** catapulte — native or Workers,
+since the HTTP API + lifecycle events are identical. Mirrors the upstream
+`scripts/smoke-test.sh` assertion (real delivery) but URL-only, no mail-sink peek.
+
+- `mise run test:local` — shared smoke vs a local compose stack (mailpit ⇒ PASS)
+- `mise run test:cf` — shared smoke vs the deployed Worker (needs a verified sender for PASS)
+- `mise run test:compose` — the upstream compose suite (mirrors `just test-compose`)
+- `mise run verify` — fast API/A/B/C check (acceptance-level, no real delivery)
+- `mise run cargo:test` — native unit/integration tests
+
+Proven: the same `smoke.nu` → `SMOKE PASS` against native (mailpit), and correctly
+reports `delivery.failed` against CF when the sender domain isn't verified.
+
 ## Live deployment
 
 - URL: `https://catapulte-worker.gedw99.workers.dev` (account gedw99@gmail.com)

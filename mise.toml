@@ -121,6 +121,44 @@ run = "cargo run -p catapulte -- healthcheck"
 
 
 # =============================================================================
+# test:* — end-to-end smoke tests (shared between native + Cloudflare)
+# =============================================================================
+# scripts/smoke.nu is one URL-parameterized test (submit → confirm delivery via
+# /events). The SAME test runs against a native compose stack and against the
+# deployed Worker — that's the whole point.
+
+[tasks."test:compose"]
+description = "Upstream compose smoke tests (mirrors `just test-compose`)"
+shell = "nu -c"
+run = '''
+./scripts/smoke-test.sh compose/local-dev.yml
+./scripts/smoke-test.sh compose/sqlite.yml
+./scripts/smoke-test.sh compose/postgres-nats.yml
+'''
+
+[tasks."test:local"]
+description = "Shared smoke against a local compose stack (same test as test:cf)"
+shell = "nu -c"
+run = '''
+docker compose -f compose/local-dev.yml up -d --build
+let result = (do -i { nu scripts/smoke.nu http://localhost:3000 } | complete)
+print $result.stdout
+docker compose -f compose/local-dev.yml down -v | ignore
+exit $result.exit_code
+'''
+
+[tasks."test:cf"]
+description = "Shared smoke against the deployed Worker (CATAPULTE_WORKER_URL or fnox; needs a verified sender for a PASS)"
+shell = "nu -c"
+run = '''
+let base = ($env.CATAPULTE_WORKER_URL? | default "" | str trim)
+let base = (if ($base | is-empty) { (do -i { fnox get CATAPULTE_WORKER_URL } | default "" | str trim) } else { $base })
+if ($base | is-empty) { print "set CATAPULTE_WORKER_URL (env) or: fnox set -p keychain CATAPULTE_WORKER_URL https://..."; exit 1 }
+nu scripts/smoke.nu $base
+'''
+
+
+# =============================================================================
 # secrets:* — fnox contract
 # =============================================================================
 
