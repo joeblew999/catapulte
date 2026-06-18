@@ -1,0 +1,19 @@
+# Standalone (excluded from the native workspace): wasm32-only Durable Object
+# SQLite storage + queue. Folds storage + queue + scheduling into one primitive
+# (no D1, no CF Queues, no cron). Built via worker-build.
+[package]
+name = "catapulte-outbound-do"
+version = "2.0.0"
+edition = "2024"
+license = "AGPL-3.0"
+rust-version = "1.95"
+publish = false
+
+[dependencies]
+anyhow = "1"
+catapulte-domain = { path = "../../domain" }
+catapulte-outbound-sql-core = { path = "../outbound-sql-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "js"] }
+worker = { version = "0.8" }

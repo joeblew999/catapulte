@@ -12,6 +12,7 @@ members = [
     "adapter/outbound-attachment-s3",
     "adapter/outbound-attachment-redis",
     "adapter/outbound-resolver",
+    "adapter/outbound-sql-core",
     "adapter/outbound-smtp",
     "adapter/outbound-nats",
     "adapter/outbound-webhook",
@@ -27,6 +28,7 @@ members = [
 exclude = [
     "worker",
     "adapter/outbound-d1",
+    "adapter/outbound-do",
 ]
 
 [workspace.package]

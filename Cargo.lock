@@ -699,11 +699,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "catapulte-outbound-sql-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "catapulte-domain",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "catapulte-outbound-sqlite"
 version = "2.0.0"
 dependencies = [
  "anyhow",
  "catapulte-domain",
+ "catapulte-outbound-sql-core",
  "catapulte-telemetry",
  "serde",
  "serde_json",

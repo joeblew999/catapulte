@@ -1,5 +1,5 @@
 [package]
-name = "catapulte-outbound-sqlite"
+name = "catapulte-outbound-sql-core"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -9,15 +9,14 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# Pure-serde wire DTOs shared by every SQLite-flavoured storage backend:
+# outbound-sqlite (native, sqlx), outbound-d1 (wasm, D1 binding) and
+# outbound-do (wasm, Durable Object SQLite). No sqlx/tokio/worker deps, so it
+# compiles for both native and wasm32.
+
 [dependencies]
 anyhow = { workspace = true }
 catapulte-domain = { path = "../../domain" }
-catapulte-outbound-sql-core = { path = "../outbound-sql-core" }
-catapulte-telemetry = { path = "../../telemetry" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true }
-tokio = { workspace = true }
-uuid = { workspace = true }
-
-[dev-dependencies]
+url = { workspace = true }

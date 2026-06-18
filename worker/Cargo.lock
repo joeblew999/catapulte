@@ -52,12 +52,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "catapulte-outbound-d1"
+name = "catapulte-outbound-do"
 version = "2.0.0"
 dependencies = [
  "anyhow",
  "catapulte-domain",
- "send_wrapper",
+ "catapulte-outbound-sql-core",
  "serde",
  "serde_json",
  "uuid",
@@ -65,15 +65,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "catapulte-outbound-sql-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "catapulte-domain",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "catapulte-worker"
 version = "2.0.0"
 dependencies = [
  "catapulte-domain",
- "catapulte-outbound-d1",
+ "catapulte-outbound-do",
  "console_error_panic_hook",
  "getrandom 0.2.17",
  "serde",
  "serde_json",
+ "wasm-bindgen",
  "worker",
 ]
 
@@ -469,12 +481,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "send_wrapper"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 
 [[package]]
 name = "serde"

@@ -1,50 +1,64 @@
-# catapulte on Cloudflare Workers (slice 1)
+# catapulte on Cloudflare Workers
 
-Proof-of-life that catapulte's hexagonal core runs on Workers via `workers-rs`.
-The same `domain` crate that the native binary uses is wired to a D1-backed
-storage adapter and served from a `fetch` handler.
+catapulte's hexagonal core running on Workers via `workers-rs`, with **one
+Durable Object** providing storage + queue + scheduling.
+
+## Architecture
+
+```
+fetch ──▶ CatapulteStore (Durable Object)
+            ├─ embedded SQLite  (emails + email_queue)   ← replaces D1
+            ├─ alarm()          (drain queue, backoff)   ← replaces CF Queues + cron
+            └─ serialized exec  (no row-claim races)
+```
+
+One primitive instead of D1 + Queues + cron. It maps 1:1 onto catapulte's
+native "DB-as-queue + background poller" model — the DO `alarm()` *is* the
+poller, and the DO's single-threaded execution removes the `claimed_until`
+race the native sqlite backend handles by hand.
+
+Crates:
+- `adapter/outbound-sql-core` — wire DTOs shared by sqlite / D1 / DO.
+- `adapter/outbound-do` — `DoStore`: `EmailRepository` + queue ops over DO
+  SQLite. No `SendWrapper` needed (`SqlStorage` is `Send+Sync`, `exec` is sync).
+- `adapter/outbound-d1` — D1 alternative (kept for multi-writer setups).
+- `worker/` — the `#[durable_object]` + `fetch`/`alarm` handlers.
 
 ## What works now
 
 - `GET /health/live` → `ok`
-- `POST /emails` → persists an envelope to D1 (inline `plain` / `mjml_inline` /
-  `mjml_named` bodies; recipients; params)
-- `GET /emails` → lists stored emails as JSON
+- `POST /emails` → persists + enqueues + arms the alarm
+- `GET /emails` → lists stored emails
+- `alarm()` → claims due queue rows, retries with capped exponential backoff,
+  re-arms for the next due entry
 
-This exercises the three things that had to be proven on Workers:
-1. the `domain` crate compiles to `wasm32` (it needed a tokio-feature fix —
-   see `domain/Cargo.toml`),
-2. the D1 binding works through the `EmailRepository` port
-   (`adapter/outbound-d1`),
-3. the `!Send` D1 handle/futures bridge to the `Send + Sync` domain ports via
-   `SendWrapper`/`SendFuture`.
+## What's deferred (next slice)
 
-## What's deferred to later slices
-
-- The real `inbound-http` axum `router()` (reusable — it's already separable
-  from the socket bind) instead of the hand-wired routes here.
-- **Sending** via the `send_email` binding (today the worker only persists).
-- MRML rendering — `outbound-mjml` needs a wasm build (drop tokio + the
-  reqwest/fs template loaders, fetch remote templates via `worker::Fetch`).
-- CF Queues consumer (`#[event(queue)]`) + cron GC (`#[event(scheduled)]`).
-- R2 attachment store; `lifecycle_events` for real delivery status.
+**Real delivery.** `deliver()` in `worker/src/lib.rs` is the injection point:
+render the MJML body and send via the `send_email` binding. Today it is a
+no-op success so the queue/alarm machinery runs end to end. Also deferred:
+reusing the real `inbound-http` axum `router()`, MRML wasm build, R2
+attachments, and real delivery-event status.
 
 ## Deploy
 
 ```sh
-wrangler d1 create catapulte                      # paste database_id into wrangler.toml
-wrangler d1 migrations apply catapulte
-wrangler deploy                                    # runs worker-build
+mise run worker:deploy        # wrangler deploy — provisions the DO + SQLite migration
+mise run worker:tail          # logs
 ```
 
 Local build only (no account needed):
 
 ```sh
-worker-build --release          # produces build/worker/shim.mjs
+mise run worker:build         # worker-build --release → build/worker/shim.mjs
 ```
 
-## Why this lives outside the cargo workspace
+The DO's SQLite schema is created in code (`DoStore::init_schema`, run on every
+activation) — there is no D1 database to create and no SQL migration files.
 
-`worker/` and `adapter/outbound-d1/` are `wasm32`-only and are listed under
-`exclude` in the root `Cargo.toml`, so the native `cargo build --workspace`
-stays green. They build via `worker-build` (which compiles for `wasm32`).
+## Why these crates live outside the cargo workspace
+
+`worker/`, `adapter/outbound-do/` and `adapter/outbound-d1/` are `wasm32`-only
+and listed under `exclude` in the root `Cargo.toml`, so native
+`cargo build --workspace` stays green. They build via `worker-build`.
+`outbound-sql-core` *is* a normal member (pure serde, compiles both ways).
