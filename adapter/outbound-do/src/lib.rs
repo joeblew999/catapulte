@@ -19,9 +19,16 @@ use catapulte_domain::entity::attachment::{AttachmentRef, BlobRef};
 use catapulte_domain::entity::body::BodySource;
 use catapulte_domain::entity::email::{EmailId, RecipientKind};
 use catapulte_domain::entity::envelope::Envelope;
+use catapulte_domain::entity::sender::SenderName;
+use catapulte_domain::port::email_queue::{AckToken, DequeuedEmail, EmailQueue, EmailQueueError};
 use catapulte_domain::port::email_repository::{
     EmailRecord, EmailRepository, EmailRepositoryError, EmailStatus, ListEmailsParams, SaveResult,
 };
+use catapulte_domain::port::event_repository::{
+    EventRecord, EventRepository, EventRepositoryError, ListEventsParams,
+};
+use catapulte_domain::port::health::{HealthCheck, HealthCheckError};
+use catapulte_domain::port::sender_usage::{SenderStats, SenderUsage, SenderUsageError};
 use catapulte_outbound_sql_core::{
     AttachmentRefDto, BodySourceDto, EnvelopeBodyDto, EnvelopeBodyDtoDeser, RecipientDto,
     recipients_from_dto, recipients_to_dto,
@@ -493,5 +500,89 @@ impl DoStore {
             }
         }
         Ok(blobs)
+    }
+}
+
+// --- additional ports the HTTP use-cases need --------------------------------
+// Submit goes through SubmitEmailService (repo + queue + event-publisher);
+// processing stays in the DO alarm (inherent claim_due/dequeue), so the queue
+// port only needs a real `enqueue`. Events aren't tracked yet (status lives in
+// the emails table), so EventRepository is empty and SenderUsage is zero.
+
+impl EmailQueue for DoStore {
+    fn enqueue(
+        &self,
+        id: EmailId,
+        _envelope: &Envelope,
+    ) -> impl Future<Output = Result<(), EmailQueueError>> + Send {
+        // run_at_ms = 0 → immediately due; the DO alarm picks it up.
+        let r = self
+            .sql
+            .exec(
+                "INSERT OR REPLACE INTO email_queue (email_id, run_at_ms, attempts) VALUES (?, 0, 0)",
+                vec![id.as_uuid().to_string().into()],
+            )
+            .map(|_| ())
+            .map_err(|e| EmailQueueError::Storage {
+                source: anyhow::anyhow!("enqueue: {e}"),
+            });
+        async move { r }
+    }
+
+    fn dequeue(&self) -> impl Future<Output = Result<DequeuedEmail, EmailQueueError>> + Send {
+        // The DO drains the queue via its alarm (inherent claim_due), not this
+        // blocking port method.
+        async {
+            Err(EmailQueueError::Storage {
+                source: anyhow::anyhow!("dequeue unsupported; the DO alarm drains the queue"),
+            })
+        }
+    }
+
+    fn ack(&self, _token: AckToken) -> impl Future<Output = Result<(), EmailQueueError>> + Send {
+        async { Ok(()) }
+    }
+
+    fn nack(
+        &self,
+        _token: AckToken,
+        _delay: std::time::Duration,
+    ) -> impl Future<Output = Result<(), EmailQueueError>> + Send {
+        async { Ok(()) }
+    }
+}
+
+impl EventRepository for DoStore {
+    fn list_events(
+        &self,
+        _params: ListEventsParams,
+    ) -> impl Future<Output = Result<Vec<EventRecord>, EventRepositoryError>> + Send {
+        // Lifecycle events aren't recorded yet; status lives in emails.status.
+        async { Ok(Vec::new()) }
+    }
+}
+
+impl SenderUsage for DoStore {
+    fn get_stats(
+        &self,
+        names: &[SenderName],
+        _since_ms: i64,
+    ) -> impl Future<Output = Result<Vec<SenderStats>, SenderUsageError>> + Send {
+        let stats: Vec<SenderStats> = names
+            .iter()
+            .map(|name| SenderStats {
+                name: name.clone(),
+                sent_in_range: 0,
+                failed_in_range: 0,
+            })
+            .collect();
+        async move { Ok(stats) }
+    }
+}
+
+impl HealthCheck for DoStore {
+    fn check(&self) -> impl Future<Output = Result<(), HealthCheckError>> + Send {
+        // A reachable DO with its SQLite is ready by construction.
+        async { Ok(()) }
     }
 }
