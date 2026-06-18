@@ -1,0 +1,31 @@
+# Secret resolution for catapulte.
+# Repo: github.com/joeblew999/catapulte
+#
+# Values live in the macOS keychain; this file declares the contract. Set with:
+#   fnox set -p keychain CATAPULTE_HTTP_API_KEY            <key>
+#   fnox set -p keychain CATAPULTE_SENDER_PRIMARY_USERNAME <smtp-user>
+#   fnox set -p keychain CATAPULTE_SENDER_PRIMARY_PASSWORD <smtp-pass>
+# (NEVER omit `-p keychain` — without it values get inlined as plaintext.)
+#
+# catapulte env vars are already self-namespaced with the `CATAPULTE_` prefix,
+# so a keychain dump shows which repo owns them. The app reads these directly
+# from the environment at startup — `fnox exec --` injects them, so nothing is
+# ever written to a .env file on disk.
+#
+# Local dev (mailpit) needs NO secrets: it speaks plaintext SMTP on :1025 with
+# no auth and no API key. These secrets only matter when pointing at a real
+# SMTP provider or locking the HTTP API down. See mise.toml `run:*` tasks.
+
+[providers.keychain]
+type = "keychain"
+service = "fnox"
+
+[secrets]
+# HTTP API auth — when set, every endpoint except /health requires
+# `Authorization: Bearer <this>`. Optional; unset = open API (dev only).
+CATAPULTE_HTTP_API_KEY = { provider = "keychain", value = "CATAPULTE_HTTP_API_KEY" }
+
+# Real SMTP sender credentials, keyed by sender name (PRIMARY here).
+# Map to `CATAPULTE_SENDER_{NAME}_USERNAME` / `_PASSWORD` in the app.
+CATAPULTE_SENDER_PRIMARY_USERNAME = { provider = "keychain", value = "CATAPULTE_SENDER_PRIMARY_USERNAME" }
+CATAPULTE_SENDER_PRIMARY_PASSWORD = { provider = "keychain", value = "CATAPULTE_SENDER_PRIMARY_PASSWORD" }
