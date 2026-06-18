@@ -35,6 +35,7 @@ url = "2"
 # resolve via worker::Fetch; minijinja for variable interpolation. Pure-Rust.
 mrml = { version = "6.0.1", default-features = false, features = ["parse", "render", "async"] }
 async-trait = "0.1"
+send_wrapper = "0.6"
 minijinja = { version = "2", default-features = false, features = ["builtins", "serde"] }
 # wasm randomness backend for transitive users of getrandom 0.2.
 getrandom = { version = "0.2", features = ["js"] }

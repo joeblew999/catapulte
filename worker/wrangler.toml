@@ -25,6 +25,12 @@ name = "EMAIL"
 binding = "ATTACHMENTS"
 bucket_name = "catapulte-attachments"
 
+# R2 bucket for named MJML templates + <mj-include> partials (key = <name>.mjml).
+# Create with: wrangler r2 bucket create catapulte-templates
+[[r2_buckets]]
+binding = "TEMPLATES"
+bucket_name = "catapulte-templates"
+
 # (B) Per-sender quotas/reporting (optional). JSON array; on CF a "sender" is a
 # from-domain with a send quota, not an SMTP relay. A sender with no
 # match_domain is the catch-all. Omit/empty to disable (GET /senders → []).

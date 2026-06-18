@@ -37,7 +37,7 @@ Upstream issue: https://github.com/jdrouet/catapulte/issues/722 (comment posted)
 - [x] mise tasks + `mise run verify` (nushell, A/B/C) + `DEPLOY.md`.
 - [x] D1 adapter (`outbound-d1`) kept as a multi-writer alternative to the DO.
 - [x] **Outbound webhooks** (`CATAPULTE_WEBHOOK_URL` + optional `_TOKEN`) — composite `EventSink` records to the DO **and** POSTs each lifecycle event (Queued/Sent/Failed) to the webhook, best-effort (a down webhook never blocks email).
-- [x] **MJML includes** — `<mj-include path="https://…">` partials resolve via `worker::Fetch` (mrml async parse + `FetchIncludeLoader`; mrml's async loader is `?Send` on wasm).
+- [x] **MJML includes** (multi-loader) — `<mj-include path="header">` loads `<name>.mjml` from the TEMPLATES R2 bucket; `path="https://…"` is fetched via worker::Fetch. mrml async parse + a WorkerIncludeLoader (mrml async loader is ?Send on wasm). Verified live.
 - [x] **Remote-template per-host auth** (`CATAPULTE_RESOLVER_AUTH` JSON host→header) — auth header added when fetching remote templates for matching hosts.
 
 ## Remaining (all optional / low-priority)

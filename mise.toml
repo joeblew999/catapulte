@@ -177,10 +177,13 @@ run = "fnox exec -- wrangler tail"
 # the table schema is created in code (DoStore::init_schema).
 
 [tasks."r2:create"]
-description = "Create the R2 bucket for attachments (run once)"
+description = "Create the R2 buckets for attachments + templates/partials (run once)"
 dir = "worker"
 shell = "nu -c"
-run = "fnox exec -- wrangler r2 bucket create catapulte-attachments"
+run = '''
+fnox exec -- wrangler r2 bucket create catapulte-attachments
+fnox exec -- wrangler r2 bucket create catapulte-templates
+'''
 
 [tasks."secret:api-key"]
 description = "Set the HTTP API key as a Worker secret (from the fnox CATAPULTE_HTTP_API_KEY value)"

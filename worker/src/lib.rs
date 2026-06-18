@@ -17,8 +17,11 @@
 //! (status lives in `emails.status`); attachments aren't accepted on this path
 //! yet (the attachment ports are inert stubs).
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
+
+use send_wrapper::SendWrapper;
 
 use base64::Engine;
 use catapulte_domain::entity::body::{BodySource, MjmlSource};
@@ -459,16 +462,16 @@ impl CatapulteStore {
                 Ok((text, html))
             }
             BodySource::Mjml(MjmlSource::Inline(src)) => {
-                Ok((None, Some(render_mjml(&interpolate(src, vars)?).await?)))
+                Ok((None, Some(render_mjml(&interpolate(src, vars)?, &self.env).await?)))
             }
             BodySource::Mjml(MjmlSource::Named(name)) => {
                 let src = self.fetch_named_template(name).await?;
-                Ok((None, Some(render_mjml(&interpolate(&src, vars)?).await?)))
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?, &self.env).await?)))
             }
             BodySource::Mjml(MjmlSource::Remote(url)) => {
                 let auth = resolver_auth(&self.env, url);
                 let src = fetch_remote_template(url, auth.as_deref()).await?;
-                Ok((None, Some(render_mjml(&interpolate(&src, vars)?).await?)))
+                Ok((None, Some(render_mjml(&interpolate(&src, vars)?, &self.env).await?)))
             }
         }
     }
@@ -581,10 +584,11 @@ fn interpolate(
         .map_err(|e| format!("interpolation failed: {e}"))
 }
 
-async fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
-    // Async parse so <mj-include path="https://..."> partials resolve via Fetch.
-    let opts = std::sync::Arc::new(mrml::prelude::parser::AsyncParserOptions {
-        include_loader: Box::new(FetchIncludeLoader),
+async fn render_mjml(mjml: &str, env: &Env) -> std::result::Result<String, String> {
+    // Async parse so <mj-include> partials resolve: a URL path via Fetch, any
+    // other path as a named partial from the TEMPLATES R2 bucket.
+    let opts = Arc::new(mrml::prelude::parser::AsyncParserOptions {
+        include_loader: Box::new(WorkerIncludeLoader::new(env.clone())),
     });
     let parsed = mrml::async_parse_with_options(mjml, opts)
         .await
@@ -595,30 +599,57 @@ async fn render_mjml(mjml: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("mjml render failed: {e}"))
 }
 
-/// Resolves `<mj-include>` partials by fetching the `path` as a URL via
-/// `worker::Fetch`. mrml's async loader is `?Send` on wasm, so a `!Send` Fetch
-/// future is fine here.
-#[derive(Debug)]
-struct FetchIncludeLoader;
+/// Resolves `<mj-include>` partials two ways (a "multi" loader):
+/// - `path` is an `http(s)` URL  → fetched via `worker::Fetch` (remote partials)
+/// - any other `path`            → `<path>.mjml` from the `TEMPLATES` R2 bucket
+///
+/// mrml's async loader is `?Send` on wasm, so the `!Send` Fetch/R2 futures are
+/// fine. Holds the `Env` (behind `SendWrapper`) to reach the R2 binding.
+struct WorkerIncludeLoader {
+    env: SendWrapper<Rc<Env>>,
+}
+
+impl WorkerIncludeLoader {
+    fn new(env: Env) -> Self {
+        Self {
+            env: SendWrapper::new(Rc::new(env)),
+        }
+    }
+}
+
+impl std::fmt::Debug for WorkerIncludeLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkerIncludeLoader")
+    }
+}
 
 #[async_trait::async_trait(?Send)]
-impl mrml::prelude::parser::loader::AsyncIncludeLoader for FetchIncludeLoader {
+impl mrml::prelude::parser::loader::AsyncIncludeLoader for WorkerIncludeLoader {
     async fn async_resolve(
         &self,
         path: &str,
     ) -> std::result::Result<String, mrml::prelude::parser::loader::IncludeLoaderError> {
         use mrml::prelude::parser::loader::IncludeLoaderError;
-        let url = url::Url::parse(path).map_err(|_| IncludeLoaderError::not_found(path))?;
-        let mut resp = Fetch::Url(url)
-            .send()
-            .await
-            .map_err(|_| IncludeLoaderError::not_found(path))?;
-        if resp.status_code() != 200 {
-            return Err(IncludeLoaderError::not_found(path));
+        let nf = || IncludeLoaderError::not_found(path);
+
+        if path.starts_with("http://") || path.starts_with("https://") {
+            let url = url::Url::parse(path).map_err(|_| nf())?;
+            let mut resp = Fetch::Url(url).send().await.map_err(|_| nf())?;
+            if resp.status_code() != 200 {
+                return Err(nf());
+            }
+            return resp.text().await.map_err(|_| nf());
         }
-        resp.text()
-            .await
-            .map_err(|_| IncludeLoaderError::not_found(path))
+
+        // Named partial from R2 (TEMPLATES). `<mj-include path="header">` → header.mjml
+        let key = if path.ends_with(".mjml") {
+            path.to_owned()
+        } else {
+            format!("{path}.mjml")
+        };
+        let bucket = self.env.bucket(TEMPLATES_BINDING).map_err(|_| nf())?;
+        let object = bucket.get(key).execute().await.map_err(|_| nf())?.ok_or_else(nf)?;
+        object.body().ok_or_else(nf)?.text().await.map_err(|_| nf())
     }
 }
 

@@ -77,6 +77,7 @@ mise run worker:tail
 | `CATAPULTE_STORE` (Durable Object) | storage + queue + alarm scheduler |
 | `EMAIL` (send_email) | outbound delivery via the Email Service |
 | `ATTACHMENTS` (R2) | attachment blobs |
+| `TEMPLATES` (R2) | named MJML templates + `<mj-include>` partials (`<name>.mjml`) |
 | `CATAPULTE_HTTP_API_KEY` (secret) | optional bearer auth |
 
 ## Routes (the real catapulte API)
@@ -124,8 +125,10 @@ CATAPULTE_RESOLVER_AUTH = '{"templates.acme.com":"Bearer xyz"}'
 ```
 - **Webhooks** are best-effort — a down endpoint never blocks email; the event
   is always recorded (`GET /events`).
-- **MJML includes**: `<mj-include path="https://…/partial.mjml">` is fetched at
-  render time (no binding needed).
+- **MJML includes** (multi-loader): `<mj-include path="https://…/partial.mjml">`
+  is fetched via Fetch; `<mj-include path="header">` loads `header.mjml` from the
+  `TEMPLATES` R2 bucket. Upload partials with:
+  `wrangler r2 object put catapulte-templates/header.mjml --file header.mjml --remote`
 
 ## Notes / limits
 
