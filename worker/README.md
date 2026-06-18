@@ -19,33 +19,35 @@ race the native sqlite backend handles by hand.
 
 Crates:
 - `adapter/outbound-sql-core` — wire DTOs shared by sqlite / D1 / DO.
-- `adapter/outbound-do` — `DoStore`: `EmailRepository` + queue ops over DO
-  SQLite. No `SendWrapper` needed (`SqlStorage` is `Send+Sync`, `exec` is sync).
+- `adapter/outbound-do` — `DoStore`: `EmailRepository` + `EmailQueue` +
+  `EventRepository`/`EventPublisher` + `SenderUsage` over DO SQLite. No
+  `SendWrapper` needed (`SqlStorage` is `Send+Sync`, `exec` is sync).
+- `adapter/outbound-attachment-r2` — `AttachmentStore` over R2.
 - `adapter/outbound-d1` — D1 alternative (kept for multi-writer setups).
-- `worker/` — the `#[durable_object]` + `fetch`/`alarm` handlers.
+- `worker/` — `#[durable_object]` + `fetch`/`alarm`, serving the **real**
+  `inbound-http` axum `router()` over the same domain use-cases.
 
-## What works now
+## What works (feature-complete vs native)
 
-- `GET /health/live` → `ok`
-- `POST /emails` → persists + enqueues + arms the alarm
-- `GET /emails` → lists stored emails
-- `alarm()` → claims due queue rows, **renders and sends each** (then dequeues),
-  retries with capped exponential backoff, re-arms for the next due entry
-- **Delivery** (`deliver()`): interpolates variables (minijinja), renders
-  inline MJML → HTML (mrml, compiled to wasm), builds RFC822 MIME, and sends one
-  message per recipient via the Email Service `send_email` binding (`EMAIL`)
+- The full HTTP API — the real `inbound-http` router (routes, bearer auth,
+  extractors, body limits), not hand-wired: `POST /emails` (+ `/batch`),
+  `GET /emails`, `/emails/{id}/events`, `/events`, `/senders`, `/health/*`.
+- Submit → `SubmitEmailService` (save + enqueue + event); `alarm()` drains with
+  capped backoff, renders, sends, records status + lifecycle events.
+- Rendering: minijinja interpolation + mrml MJML, with `<mj-include>` partials
+  (named → `TEMPLATES` R2 bucket, URL → `worker::Fetch`).
+- Send via the Email Service `send_email` binding.
+- R2 attachments (stored on submit, in the MIME on send, GC'd at terminal).
+- Real status + lifecycle events; optional **webhooks** for event fan-out.
+- Multi-tenant DO sharding (`X-Catapulte-Tenant`), per-sender quotas
+  (`CATAPULTE_SENDERS`), per-host remote-template auth (`CATAPULTE_RESOLVER_AUTH`).
 
-Caveats: the sender domain must be verified in your Cloudflare account. Named/
-remote MJML templates aren't resolvable in the worker yet (they error so the
-queue retries rather than sending blanks) — inline MJML and plain bodies work.
+Caveat: real delivery needs a sender domain verified in your CF account.
 
-## What's deferred
+## Remaining (hardening, not features)
 
-- Reusing the real `inbound-http` axum `router()` (it's separable from the
-  socket) instead of the hand-wired routes.
-- Named/remote template resolution (fetch via `worker::Fetch`).
-- R2 attachments and real delivery-event status (`list_emails` reports
-  everything as `queued`).
+See the repo-root `TODO.md`. Briefly: R2 orphan-sweep cron, webhook HMAC
+signing. N/A on CF: NATS inbound (use CF Queues), OTEL (CF observability).
 
 ## Deploy
 

@@ -6,16 +6,18 @@
 //! same routes, auth middleware, extractors and body limits as the native
 //! server — served inside the DO over the same domain use-cases.
 //!
-//! Request flow: `fetch` forwards to a single DO instance ("default"); the DO
-//! builds an app state over its SQLite and serves the axum router. Submissions
-//! go through `SubmitEmailService` (save + enqueue + event); the DO `alarm()`
-//! drains the queue, renders (minijinja + mrml) and sends via the Email Service
-//! `send_email` binding, with capped exponential backoff and real status.
+//! Request flow: `fetch` routes by the `X-Catapulte-Tenant` header to a
+//! per-tenant DO; the DO builds an app state over its SQLite and serves the
+//! axum router. Submissions go through `SubmitEmailService` (save + enqueue +
+//! event); the DO `alarm()` drains the queue, renders (minijinja + mrml, incl.
+//! `<mj-include>` partials) and sends via the Email Service `send_email`
+//! binding, with capped exponential backoff, real status + lifecycle events.
 //!
-//! Worker-shaped ports: storage/queue/usage/health are the DO's SQLite
-//! (`outbound-do`); the clock is `Date::now()`; events aren't recorded yet
-//! (status lives in `emails.status`); attachments aren't accepted on this path
-//! yet (the attachment ports are inert stubs).
+//! Worker-shaped ports: storage/queue/usage/health/events are the DO's SQLite
+//! (`outbound-do`); the clock is `Date::now()`; attachments are stored in R2
+//! (`outbound-attachment-r2`); lifecycle events optionally fan out to a webhook
+//! (`EventSink`). Per-sender quotas (B), multi-tenant sharding (C) and per-host
+//! remote-template auth are all wired here.
 
 use std::rc::Rc;
 use std::sync::Arc;
